@@ -18,7 +18,7 @@ pr: none
 
 parameters:
   - name: deployInfra
-    displayName: 'Deploy infrastructure before code'
+    displayName: 'Deploy Infrastructure'
     type: boolean
     default: false
   - name: deployToProd
