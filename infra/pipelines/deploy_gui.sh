@@ -10,6 +10,7 @@ lowercase() {
 
 required_variables=(
   PYRIT_SLOT
+  PYRIT_DEPLOY_INFRA
   PYRIT_BUILD_ID
   PYRIT_SOURCE_DIRECTORY
   PYRIT_AGENT_TEMP_DIRECTORY
@@ -50,8 +51,9 @@ if [[ -n "${PYRIT_ALLOWED_CLIENT_CIDR:-}" ]]; then
   exit 1
 fi
 
-if [[ ! "$PYRIT_SLOT" =~ ^(test|prod)$ || ! "$PYRIT_BUILD_ID" =~ ^[0-9]+$ ]]; then
-  echo "##vso[task.logissue type=error]Invalid slot or build ID"
+if [[ ! "$PYRIT_SLOT" =~ ^(test|prod)$ || ! "$PYRIT_BUILD_ID" =~ ^[0-9]+$ ||
+  ! "$PYRIT_DEPLOY_INFRA" =~ ^(true|false)$ ]]; then
+  echo "##vso[task.logissue type=error]Invalid slot, build ID, or deployInfra value"
   exit 1
 fi
 
@@ -79,7 +81,7 @@ if ! python3 - \
   "$PYRIT_ENTRA_CLIENT_ID" \
   "$PYRIT_ALLOWED_GROUP_OBJECT_IDS" \
   "$PYRIT_ADMIN_GROUP_OBJECT_ID" \
-  "${PYRIT_CONFIG_FILE_URI:-}" <<'PY'
+  "${PYRIT_CONFIG_FILE_URI:-}" << 'PY'; then
 import ipaddress
 import sys
 import uuid
@@ -124,8 +126,7 @@ try:
 except (ValueError, IndexError):
     raise SystemExit(1)
 PY
-then
-    echo "##vso[task.logissue type=error]Invalid network prefix, subnet sizing, Entra ID, group ID, or config URI"
+  echo "##vso[task.logissue type=error]Invalid network prefix, subnet sizing, Entra ID, group ID, or config URI"
   exit 1
 fi
 
@@ -155,19 +156,19 @@ if [[ ! "$normalized_key_vault_resource_id" =~ ^/subscriptions/($guid_pattern)/r
   echo "##vso[task.logissue type=error]Key Vault resource ID is not canonical or is in another subscription"
   exit 1
 fi
-if [[ ! "$PYRIT_SQL_SERVER_FQDN" =~ ^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]\.database\.windows\.net$ \
-  || ! "$PYRIT_ENV_SECRET_NAME" =~ ^[a-zA-Z0-9-]{1,127}$ \
-  || ! "$PYRIT_ENABLE_OTEL" =~ ^(true|false)$ ]]; then
+if [[ ! "$PYRIT_SQL_SERVER_FQDN" =~ ^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]\.database\.windows\.net$ ||
+  ! "$PYRIT_ENV_SECRET_NAME" =~ ^[a-zA-Z0-9-]{1,127}$ ||
+  ! "$PYRIT_ENABLE_OTEL" =~ ^(true|false)$ ]]; then
   echo "##vso[task.logissue type=error]Invalid SQL FQDN, Key Vault secret name, or enableOtel value"
   exit 1
 fi
-if ! az resource show --ids "$PYRIT_MANAGED_IDENTITY_RESOURCE_ID" --api-version 2023-01-31 -o none 2>/dev/null; then
+if ! az resource show --ids "$PYRIT_MANAGED_IDENTITY_RESOURCE_ID" --api-version 2023-01-31 -o none 2> /dev/null; then
   echo "##vso[task.logissue type=error]Managed identity does not exist or is not readable"
   exit 1
 fi
 
 deployment_resource_group_id=$(az group show \
-  --name "$PYRIT_DEPLOYMENT_RESOURCE_GROUP" --query id -o tsv 2>/dev/null || true)
+  --name "$PYRIT_DEPLOYMENT_RESOURCE_GROUP" --query id -o tsv 2> /dev/null || true)
 if [[ -z "$deployment_resource_group_id" ]]; then
   echo "##vso[task.logissue type=error]Deployment resource group must already exist"
   exit 1
@@ -194,31 +195,31 @@ normalized_expected_pip_id=$(lowercase "$expected_pip_id")
 existing_app=$(az containerapp show \
   --resource-group "$PYRIT_DEPLOYMENT_RESOURCE_GROUP" \
   --name "$PYRIT_APP_NAME" \
-  --query '{id:id,environmentId:properties.managedEnvironmentId,tags:tags,containers:properties.template.containers[].{name:name,image:image}}' -o json 2>/dev/null || true)
+  --query '{id:id,environmentId:properties.managedEnvironmentId,tags:tags,mode:properties.configuration.activeRevisionsMode,revision:properties.latestRevisionName,containers:properties.template.containers[].{name:name,image:image}}' -o json 2> /dev/null || true)
 existing_environment=$(az containerapp env show \
   --resource-group "$PYRIT_DEPLOYMENT_RESOURCE_GROUP" \
   --name "$PYRIT_APP_NAME-env" \
-  --query '{id:id,publicNetworkAccess:properties.publicNetworkAccess}' -o json 2>/dev/null || true)
+  --query '{id:id,publicNetworkAccess:properties.publicNetworkAccess}' -o json 2> /dev/null || true)
 existing_vnet=$(az network vnet show \
   --resource-group "$PYRIT_DEPLOYMENT_RESOURCE_GROUP" \
   --name "$PYRIT_APP_NAME-vnet" \
-  --query '{id:id,prefix:addressSpace.addressPrefixes[0],tags:tags}' -o json 2>/dev/null || true)
+  --query '{id:id,prefix:addressSpace.addressPrefixes[0],tags:tags}' -o json 2> /dev/null || true)
 existing_subnet=$(az network vnet subnet show \
   --resource-group "$PYRIT_DEPLOYMENT_RESOURCE_GROUP" \
   --vnet-name "$PYRIT_APP_NAME-vnet" \
   --name "$PYRIT_APP_NAME-aca-subnet" \
-  --query '{id:id,prefix:addressPrefix,natId:natGateway.id}' -o json 2>/dev/null || true)
+  --query '{id:id,prefix:addressPrefix,natId:natGateway.id}' -o json 2> /dev/null || true)
 existing_nat=$(az network nat gateway show \
   --resource-group "$PYRIT_DEPLOYMENT_RESOURCE_GROUP" \
   --name "$PYRIT_APP_NAME-nat" \
-  --query '{id:id,pipId:publicIpAddresses[0].id,tags:tags}' -o json 2>/dev/null || true)
+  --query '{id:id,pipId:publicIpAddresses[0].id,tags:tags}' -o json 2> /dev/null || true)
 existing_pip=$(az network public-ip show \
   --resource-group "$PYRIT_DEPLOYMENT_RESOURCE_GROUP" \
   --name "$PYRIT_APP_NAME-egress-pip" \
-  --query '{id:id,ip:ipAddress,allocation:publicIPAllocationMethod,sku:sku.name,tags:tags}' -o json 2>/dev/null || true)
+  --query '{id:id,ip:ipAddress,allocation:publicIPAllocationMethod,sku:sku.name,tags:tags}' -o json 2> /dev/null || true)
 
-if [[ -z "$existing_app" || -z "$existing_environment" || -z "$existing_vnet" || -z "$existing_subnet" \
-  || -z "$existing_nat" || -z "$existing_pip" ]]; then
+if [[ -z "$existing_app" || -z "$existing_environment" || -z "$existing_vnet" || -z "$existing_subnet" ||
+  -z "$existing_nat" || -z "$existing_pip" ]]; then
   echo "##vso[task.logissue type=error]Internal deployments must adopt an existing app, environment, VNet, subnet, NAT, and egress PIP"
   exit 1
 fi
@@ -232,61 +233,101 @@ existing_pip_ip_tags=$(az network public-ip show \
   --name "$PYRIT_APP_NAME-egress-pip" --query 'ipTags || `[]`' -o json | jq -c .)
 expected_egress_ip=$(jq -r '.ip // empty' <<< "$existing_pip")
 
-if [[ "$(jq -r '.id | ascii_downcase' <<< "$existing_app")" != "$normalized_expected_app_id" \
-  || "$(jq -r '.environmentId | ascii_downcase' <<< "$existing_app")" != "$normalized_expected_environment_id" \
-  || "$(jq -r '.id | ascii_downcase' <<< "$existing_environment")" != "$normalized_expected_environment_id" \
-  || ! "$(jq -r '.publicNetworkAccess' <<< "$existing_environment")" =~ ^(Enabled|Disabled)$ \
-  || "$(jq -r '.id | ascii_downcase' <<< "$existing_vnet")" != "$normalized_expected_vnet_id" \
-  || "$(jq -r '.id | ascii_downcase' <<< "$existing_subnet")" != "$normalized_expected_subnet_id" \
-  || "$(jq -r '.id | ascii_downcase' <<< "$existing_nat")" != "$normalized_expected_nat_id" \
-  || "$(jq -r '.id | ascii_downcase' <<< "$existing_pip")" != "$normalized_expected_pip_id" \
-  || "$(jq -r '.natId | ascii_downcase' <<< "$existing_subnet")" != "$normalized_expected_nat_id" \
-  || "$(jq -r '.pipId | ascii_downcase' <<< "$existing_nat")" != "$normalized_expected_pip_id" \
-  || "$(jq -r '.prefix' <<< "$existing_vnet")" != "$PYRIT_VNET_ADDRESS_PREFIX" \
-  || "$(jq -r '.prefix' <<< "$existing_subnet")" != "$PYRIT_INFRASTRUCTURE_SUBNET_ADDRESS_PREFIX" \
-  || "$(jq -r '.allocation' <<< "$existing_pip")" != "Static" \
-  || "$(jq -r '.sku' <<< "$existing_pip")" != "Standard" \
-  || -z "$expected_egress_ip" ]]; then
+if [[ "$(jq -r '.id | ascii_downcase' <<< "$existing_app")" != "$normalized_expected_app_id" ||
+"$(jq -r '.environmentId | ascii_downcase' <<< "$existing_app")" != "$normalized_expected_environment_id" ||
+"$(jq -r '.id | ascii_downcase' <<< "$existing_environment")" != "$normalized_expected_environment_id" ||
+! "$(jq -r '.publicNetworkAccess' <<< "$existing_environment")" =~ ^(Enabled|Disabled)$ ||
+"$(jq -r '.id | ascii_downcase' <<< "$existing_vnet")" != "$normalized_expected_vnet_id" ||
+"$(jq -r '.id | ascii_downcase' <<< "$existing_subnet")" != "$normalized_expected_subnet_id" ||
+"$(jq -r '.id | ascii_downcase' <<< "$existing_nat")" != "$normalized_expected_nat_id" ||
+"$(jq -r '.id | ascii_downcase' <<< "$existing_pip")" != "$normalized_expected_pip_id" ||
+"$(jq -r '.natId | ascii_downcase' <<< "$existing_subnet")" != "$normalized_expected_nat_id" ||
+"$(jq -r '.pipId | ascii_downcase' <<< "$existing_nat")" != "$normalized_expected_pip_id" ||
+"$(jq -r '.prefix' <<< "$existing_vnet")" != "$PYRIT_VNET_ADDRESS_PREFIX" ||
+"$(jq -r '.prefix' <<< "$existing_subnet")" != "$PYRIT_INFRASTRUCTURE_SUBNET_ADDRESS_PREFIX" ||
+"$(jq -r '.allocation' <<< "$existing_pip")" != "Static" ||
+"$(jq -r '.sku' <<< "$existing_pip")" != "Standard" ||
+-z "$expected_egress_ip" ]]; then
   echo "##vso[task.logissue type=error]Deployment variables do not match the existing protected topology"
   exit 1
 fi
 
-if [[ "$deployment_tags" == *'<'* || "$deployment_tags" == "null" \
-  || "$deployment_tags" != "$pip_tags" || "$deployment_tags" != "$nat_tags" \
-  || "$deployment_tags" != "$vnet_tags" ]]; then
+if [[ "$deployment_tags" == *'<'* || "$deployment_tags" == "null" ||
+  "$deployment_tags" != "$pip_tags" || "$deployment_tags" != "$nat_tags" ||
+  "$deployment_tags" != "$vnet_tags" ]]; then
   echo "##vso[task.logissue type=error]Protected resource tags are missing, placeholders, or inconsistent"
   exit 1
 fi
 
-if [[ "$(jq '.containers | length' <<< "$existing_app")" != "1" \
-  || "$(jq -r '.containers[0].name' <<< "$existing_app")" != "pyrit-gui" ]]; then
-  echo "##vso[task.logissue type=error]Infrastructure deployment requires the existing pyrit-gui container"
+if [[ "$(jq '.containers | length' <<< "$existing_app")" != "1" ||
+"$(jq -r '.containers[0].name' <<< "$existing_app")" != "pyrit-gui" ||
+"$(jq -r '.mode' <<< "$existing_app")" != "Single" ]]; then
+  echo "##vso[task.logissue type=error]Deployment requires the existing single-revision pyrit-gui container"
   exit 1
 fi
 current_image=$(jq -r '.containers[0].image // empty' <<< "$existing_app")
-if [[ ! "$current_image" =~ ^([^/]+)/(.+)@(sha256:[0-9a-fA-F]{64})$ ]]; then
-  echo "##vso[task.logissue type=error]Current image must be an immutable registry digest"
+current_revision=$(jq -r '.revision // empty' <<< "$existing_app")
+echo "Current image (not automatically restored after an app failure): $current_image"
+deploy_app=true
+if [[ "$PYRIT_DEPLOY_INFRA" == "true" ]]; then
+  deploy_app=false
+  requested_image=$current_image
+  if [[ -z "$current_revision" ]]; then
+    echo "##vso[task.logissue type=error]Infrastructure deployment requires an existing app revision"
+    exit 1
+  fi
+  echo "Reconciling infrastructure only; leaving the running application unchanged"
+else
+  requested_image=${PYRIT_CONTAINER_IMAGE:-}
+fi
+if [[ ! "$requested_image" =~ ^([^/]+)/(.+)@(sha256:[0-9a-fA-F]{64})$ ]]; then
+  echo "##vso[task.logissue type=error]Requested image must be an immutable registry digest"
   exit 1
 fi
 registry_server=${BASH_REMATCH[1]}
 repository=${BASH_REMATCH[2]}
 digest=${BASH_REMATCH[3]}
 if [[ "$registry_server" != "$acr_name.azurecr.io" ]]; then
-  echo "##vso[task.logissue type=error]Current image registry does not match ACR resource ID"
+  echo "##vso[task.logissue type=error]Requested image registry does not match ACR resource ID"
   exit 1
 fi
 repository_pattern='^[a-z0-9]+([._-][a-z0-9]+)*(/[a-z0-9]+([._-][a-z0-9]+)*)*$'
 if [[ ! "$repository" =~ $repository_pattern ]]; then
-  echo "##vso[task.logissue type=error]Current image repository is invalid"
+  echo "##vso[task.logissue type=error]Requested image repository is invalid"
   exit 1
 fi
 immutable_image="$registry_server/$repository@$digest"
-echo "Infrastructure-only deployment; retaining current image: $immutable_image"
 private_link_request_message="Azure Front Door private access to $PYRIT_APP_NAME"
+enable_front_door=true
+enable_private_link=true
+disable_public_access=true
+expected_public_access=Disabled
+if [[ "$PYRIT_DEPLOY_INFRA" == "false" ]]; then
+  expected_public_access=$(jq -r '.publicNetworkAccess' <<< "$existing_environment")
+  front_door_count=$(az resource list \
+    --resource-group "$PYRIT_DEPLOYMENT_RESOURCE_GROUP" \
+    --resource-type Microsoft.Cdn/profiles --name "$PYRIT_APP_NAME-afd" --query 'length(@)' -o tsv)
+  case "$front_door_count" in
+    0) enable_front_door=false ;;
+    1) enable_front_door=true ;;
+    *)
+      echo "##vso[task.logissue type=error]Could not identify the existing Front Door profile"
+      exit 1
+      ;;
+  esac
+  if [[ "$expected_public_access" == "Enabled" ]]; then
+    enable_private_link=false
+    disable_public_access=false
+  elif [[ "$enable_front_door" != "true" ]]; then
+    echo "##vso[task.logissue type=error]Private ACA access requires the existing Front Door profile"
+    exit 1
+  fi
+fi
 
 parameters=(
   "appName=$PYRIT_APP_NAME"
-  "containerImage=$immutable_image"
+  "deployInfra=$PYRIT_DEPLOY_INFRA"
+  "deployApp=$deploy_app"
   "entraTenantId=$PYRIT_ENTRA_TENANT_ID"
   "entraClientId=$PYRIT_ENTRA_CLIENT_ID"
   "allowedGroupObjectIds=$PYRIT_ALLOWED_GROUP_OBJECT_IDS"
@@ -300,16 +341,19 @@ parameters=(
   "enableOtel=$PYRIT_ENABLE_OTEL"
   "envSecretName=$PYRIT_ENV_SECRET_NAME"
   "pyritConfigFileUri=${PYRIT_CONFIG_FILE_URI:-}"
-  "enableFrontDoor=true"
-  "enableFrontDoorPrivateLink=true"
+  "enableFrontDoor=$enable_front_door"
+  "enableFrontDoorPrivateLink=$enable_private_link"
   "frontDoorPrivateLinkRequestMessage=$private_link_request_message"
-  "disableContainerAppsPublicAccess=true"
+  "disableContainerAppsPublicAccess=$disable_public_access"
   "vnetAddressPrefix=$PYRIT_VNET_ADDRESS_PREFIX"
   "infrastructureSubnetAddressPrefix=$PYRIT_INFRASTRUCTURE_SUBNET_ADDRESS_PREFIX"
   "egressPublicIpTags=$existing_pip_ip_tags"
   "protectEgressPublicIp=true"
   "tags=$deployment_tags"
 )
+if [[ "$deploy_app" == "true" ]]; then
+  parameters+=("containerImage=$immutable_image")
+fi
 
 rollback_parameters=()
 for parameter in "${parameters[@]}"; do
@@ -320,12 +364,14 @@ for parameter in "${parameters[@]}"; do
   esac
 done
 
-deployment_name="pyrit-$PYRIT_SLOT-$PYRIT_BUILD_ID"
+deployment_name="pyrit-$PYRIT_SLOT-$PYRIT_BUILD_ID-app"
+[[ "$PYRIT_DEPLOY_INFRA" == "true" ]] && deployment_name="pyrit-$PYRIT_SLOT-$PYRIT_BUILD_ID-infra"
 what_if_file="$PYRIT_AGENT_TEMP_DIRECTORY/$deployment_name-what-if.json"
 az deployment group what-if \
   --name "$deployment_name-preview" \
   --resource-group "$PYRIT_DEPLOYMENT_RESOURCE_GROUP" \
   --template-file "$PYRIT_SOURCE_DIRECTORY/infra/main.bicep" \
+  --mode Incremental \
   --parameters "${parameters[@]}" \
   --result-format FullResourcePayloads --no-pretty-print -o json > "$what_if_file"
 
@@ -340,6 +386,25 @@ if ! python3 "$PYRIT_SOURCE_DIRECTORY/infra/pipelines/validate_what_if.py" \
   --expected-subnet-id "$expected_subnet_id" \
   --expected-environment-id "$expected_environment_id"; then
   echo "##vso[task.logissue type=error]What-if contains a delete, cross-resource-group write, protected-network change, or core resource create"
+  exit 1
+fi
+
+if [[ "$PYRIT_DEPLOY_INFRA" == "false" ]] && ! jq -e --arg app "$normalized_expected_app_id" '
+  .changes | all(.[];
+    .changeType == "Ignore" or .changeType == "NoChange" or
+    (.changeType == "Modify" and (.resourceId | ascii_downcase) == $app))
+' "$what_if_file" > /dev/null; then
+  echo "##vso[task.logissue type=error]App-only preview must not write infrastructure"
+  exit 1
+fi
+
+if [[ "$PYRIT_DEPLOY_INFRA" == "true" ]] && ! jq -e --arg app "$normalized_expected_app_id" '
+  .changes | all(.[];
+    .changeType == "Ignore" or .changeType == "NoChange" or
+    ((.resourceId | ascii_downcase | rtrimstr("/")) as $id |
+      $id != $app and ($id | startswith($app + "/") | not)))
+' "$what_if_file" > /dev/null; then
+  echo "##vso[task.logissue type=error]Infrastructure-only preview must not write the Container App"
   exit 1
 fi
 
@@ -360,10 +425,10 @@ rollback_public_origin() {
         --resource-group "$PYRIT_DEPLOYMENT_RESOURCE_GROUP" \
         --template-file "$PYRIT_SOURCE_DIRECTORY/infra/modules/aca_front_door.bicep" \
         --parameters \
-          "namePrefix=$PYRIT_APP_NAME" \
-          "originHostName=$rollback_origin_host" \
-          "tags=$deployment_tags" \
-          "enablePrivateLink=false" || true
+        "namePrefix=$PYRIT_APP_NAME" \
+        "originHostName=$rollback_origin_host" \
+        "tags=$deployment_tags" \
+        "enablePrivateLink=false" || true
     fi
 
     local rollback_connections
@@ -372,7 +437,7 @@ rollback_public_origin() {
     rollback_connections=$(az network private-endpoint-connection list \
       --resource-group "$PYRIT_DEPLOYMENT_RESOURCE_GROUP" \
       --name "$PYRIT_APP_NAME-env" \
-      --type Microsoft.App/managedEnvironments -o json 2>/dev/null || true)
+      --type Microsoft.App/managedEnvironments -o json 2> /dev/null || true)
     if [[ -n "$rollback_connections" ]]; then
       while IFS= read -r connection_id; do
         [[ -z "$connection_id" ]] && continue
@@ -390,7 +455,7 @@ rollback_public_origin() {
       rollback_connections=$(az network private-endpoint-connection list \
         --resource-group "$PYRIT_DEPLOYMENT_RESOURCE_GROUP" \
         --name "$PYRIT_APP_NAME-env" \
-        --type Microsoft.App/managedEnvironments -o json 2>/dev/null || true)
+        --type Microsoft.App/managedEnvironments -o json 2> /dev/null || true)
       if [[ -z "$rollback_connections" ]]; then
         rollback_connection_count=-1
         [[ "$attempt" -lt 20 ]] && sleep 15
@@ -412,6 +477,7 @@ rollback_public_origin() {
       --name "$deployment_name-rollback" \
       --resource-group "$PYRIT_DEPLOYMENT_RESOURCE_GROUP" \
       --template-file "$PYRIT_SOURCE_DIRECTORY/infra/main.bicep" \
+      --mode Incremental \
       --parameters "${rollback_parameters[@]}"; then
       echo "##vso[task.logissue type=warning]Public ACA origin rollback completed"
     else
@@ -420,114 +486,134 @@ rollback_public_origin() {
   fi
   exit "$exit_code"
 }
-trap rollback_public_origin EXIT
-trap 'exit 143' TERM
-trap 'exit 130' INT
-cutover_in_progress=true
+if [[ "$PYRIT_DEPLOY_INFRA" == "true" ]]; then
+  trap rollback_public_origin EXIT
+  trap 'exit 143' TERM
+  trap 'exit 130' INT
+  cutover_in_progress=true
+fi
 
 az deployment group create \
   --name "$deployment_name" \
   --resource-group "$PYRIT_DEPLOYMENT_RESOURCE_GROUP" \
   --template-file "$PYRIT_SOURCE_DIRECTORY/infra/main.bicep" \
+  --mode Incremental \
   --parameters "${parameters[@]}"
 
-deployed_private_link_request_message=$(az deployment group show \
-  --name "$deployment_name" --resource-group "$PYRIT_DEPLOYMENT_RESOURCE_GROUP" \
-  --query properties.outputs.frontDoorPrivateLinkRequestMessage.value -o tsv)
-if [[ "$deployed_private_link_request_message" != "$private_link_request_message" ]]; then
-  echo "##vso[task.logissue type=error]Deployment Private Link request message does not match the approved pipeline value"
-  exit 1
-fi
-origin_resource_url="https://management.azure.com${deployment_resource_group_id}/providers/Microsoft.Cdn/profiles/$PYRIT_APP_NAME-afd/originGroups/$PYRIT_APP_NAME-origin-group/origins/$PYRIT_APP_NAME-aca-origin?api-version=2024-09-01"
-origin_private_link=$(az rest --method get --url "$origin_resource_url" \
-  --query '{status:properties.sharedPrivateLinkResource.status,resourceId:properties.sharedPrivateLinkResource.privateLink.id}' -o json)
-private_link_status=$(jq -r '.status // empty' <<< "$origin_private_link")
-private_link_resource_id=$(jq -r '.resourceId // empty | ascii_downcase' <<< "$origin_private_link")
-if [[ "$private_link_resource_id" != "$normalized_expected_environment_id" \
-  || ! "$private_link_status" =~ ^(Pending|Approved)$ ]]; then
-  echo "##vso[task.logissue type=error]Front Door Private Link does not target the expected ACA environment"
-  exit 1
-fi
+if [[ "$PYRIT_DEPLOY_INFRA" == "true" ]]; then
+  deployed_private_link_request_message=$(az deployment group show \
+    --name "$deployment_name" --resource-group "$PYRIT_DEPLOYMENT_RESOURCE_GROUP" \
+    --query properties.outputs.frontDoorPrivateLinkRequestMessage.value -o tsv)
+  if [[ "$deployed_private_link_request_message" != "$private_link_request_message" ]]; then
+    echo "##vso[task.logissue type=error]Deployment Private Link request message does not match the approved pipeline value"
+    exit 1
+  fi
+  origin_resource_url="https://management.azure.com${deployment_resource_group_id}/providers/Microsoft.Cdn/profiles/$PYRIT_APP_NAME-afd/originGroups/$PYRIT_APP_NAME-origin-group/origins/$PYRIT_APP_NAME-aca-origin?api-version=2024-09-01"
+  origin_private_link=$(az rest --method get --url "$origin_resource_url" \
+    --query '{status:properties.sharedPrivateLinkResource.status,resourceId:properties.sharedPrivateLinkResource.privateLink.id}' -o json)
+  private_link_status=$(jq -r '.status // empty' <<< "$origin_private_link")
+  private_link_resource_id=$(jq -r '.resourceId // empty | ascii_downcase' <<< "$origin_private_link")
+  if [[ "$private_link_resource_id" != "$normalized_expected_environment_id" ||
+    ! "$private_link_status" =~ ^(Pending|Approved)$ ]]; then
+    echo "##vso[task.logissue type=error]Front Door Private Link does not target the expected ACA environment"
+    exit 1
+  fi
 
-matching_connections=''
-for attempt in {1..20}; do
-  connections=$(az network private-endpoint-connection list \
-    --resource-group "$PYRIT_DEPLOYMENT_RESOURCE_GROUP" \
-    --name "$PYRIT_APP_NAME-env" \
-    --type Microsoft.App/managedEnvironments -o json || echo '[]')
-  matching_connections=$(jq -c --arg message "$private_link_request_message" \
-    '[.[] | select(
+  matching_connections=''
+  for attempt in {1..20}; do
+    connections=$(az network private-endpoint-connection list \
+      --resource-group "$PYRIT_DEPLOYMENT_RESOURCE_GROUP" \
+      --name "$PYRIT_APP_NAME-env" \
+      --type Microsoft.App/managedEnvironments -o json || echo '[]')
+    matching_connections=$(jq -c --arg message "$private_link_request_message" \
+      '[.[] | select(
       .properties.privateLinkServiceConnectionState.description == $message
       and (.properties.privateLinkServiceConnectionState.status == "Pending"
         or .properties.privateLinkServiceConnectionState.status == "Approved"))]' <<< "$connections")
-  connection_count=$(jq 'length' <<< "$matching_connections")
-  echo "Private Link request discovery attempt $attempt/20: $connection_count active connection(s)"
-  [[ "$connection_count" -gt 0 ]] && break
-  [[ "$attempt" -lt 20 ]] && sleep 15
-done
-if [[ "$(jq 'length' <<< "$matching_connections")" == "0" ]]; then
-  echo "##vso[task.logissue type=error]Front Door did not create the expected ACA Private Link request"
-  exit 1
-fi
-
-while IFS=$'\t' read -r connection_id connection_status; do
-  normalized_connection_id=$(lowercase "$connection_id")
-  if [[ "$normalized_connection_id" != "$normalized_expected_environment_id/privateendpointconnections/"* ]]; then
-    echo "##vso[task.logissue type=error]Private Link request is outside the expected ACA environment"
+    connection_count=$(jq 'length' <<< "$matching_connections")
+    echo "Private Link request discovery attempt $attempt/20: $connection_count active connection(s)"
+    [[ "$connection_count" -gt 0 ]] && break
+    [[ "$attempt" -lt 20 ]] && sleep 15
+  done
+  if [[ "$(jq 'length' <<< "$matching_connections")" == "0" ]]; then
+    echo "##vso[task.logissue type=error]Front Door did not create the expected ACA Private Link request"
     exit 1
   fi
-  if [[ "$connection_status" == "Pending" ]]; then
-    connection_name=${connection_id##*/}
-    connection_suffix=${connection_name:0:8}
-    az deployment group create \
-      --name "$deployment_name-private-link-approval-$connection_suffix" \
-      --resource-group "$PYRIT_DEPLOYMENT_RESOURCE_GROUP" \
-      --template-file "$PYRIT_SOURCE_DIRECTORY/infra/modules/aca_private_endpoint_approval.bicep" \
-      --parameters \
+
+  while IFS=$'\t' read -r connection_id connection_status; do
+    normalized_connection_id=$(lowercase "$connection_id")
+    if [[ "$normalized_connection_id" != "$normalized_expected_environment_id/privateendpointconnections/"* ]]; then
+      echo "##vso[task.logissue type=error]Private Link request is outside the expected ACA environment"
+      exit 1
+    fi
+    if [[ "$connection_status" == "Pending" ]]; then
+      connection_name=${connection_id##*/}
+      connection_suffix=${connection_name:0:8}
+      az deployment group create \
+        --name "$deployment_name-private-link-approval-$connection_suffix" \
+        --resource-group "$PYRIT_DEPLOYMENT_RESOURCE_GROUP" \
+        --template-file "$PYRIT_SOURCE_DIRECTORY/infra/modules/aca_private_endpoint_approval.bicep" \
+        --parameters \
         "environmentName=$PYRIT_APP_NAME-env" \
         "connectionName=$connection_name" \
         "approvalDescription=$private_link_request_message" -o none
-  fi
-done < <(jq -r '.[] | [.id, .properties.privateLinkServiceConnectionState.status] | @tsv' \
-  <<< "$matching_connections")
+    fi
+  done < <(jq -r '.[] | [.id, .properties.privateLinkServiceConnectionState.status] | @tsv' \
+    <<< "$matching_connections")
 
-approved_connection_count=0
-for attempt in {1..20}; do
-  connections=$(az network private-endpoint-connection list \
-    --resource-group "$PYRIT_DEPLOYMENT_RESOURCE_GROUP" \
-    --name "$PYRIT_APP_NAME-env" \
-    --type Microsoft.App/managedEnvironments -o json || echo '[]')
-  approved_connection_count=$(jq --arg message "$private_link_request_message" \
-    '[.[] | select(
+  approved_connection_count=0
+  for attempt in {1..20}; do
+    connections=$(az network private-endpoint-connection list \
+      --resource-group "$PYRIT_DEPLOYMENT_RESOURCE_GROUP" \
+      --name "$PYRIT_APP_NAME-env" \
+      --type Microsoft.App/managedEnvironments -o json || echo '[]')
+    approved_connection_count=$(jq --arg message "$private_link_request_message" \
+      '[.[] | select(
       .properties.privateLinkServiceConnectionState.description == $message
       and .properties.privateLinkServiceConnectionState.status == "Approved")] | length' <<< "$connections")
-  echo "ACA Private Link approval attempt $attempt/20: $approved_connection_count approved connection(s)"
-  [[ "$approved_connection_count" -gt 0 ]] && break
-  [[ "$attempt" -lt 20 ]] && sleep 15
-done
-if [[ "$approved_connection_count" == "0" ]]; then
-  echo "##vso[task.logissue type=error]ACA Private Link connection did not become approved"
-  exit 1
+    echo "ACA Private Link approval attempt $attempt/20: $approved_connection_count approved connection(s)"
+    [[ "$approved_connection_count" -gt 0 ]] && break
+    [[ "$attempt" -lt 20 ]] && sleep 15
+  done
+  if [[ "$approved_connection_count" == "0" ]]; then
+    echo "##vso[task.logissue type=error]ACA Private Link connection did not become approved"
+    exit 1
+  fi
+  echo "AFD origin status is ${private_link_status}; ACA approval and AFD health determine readiness"
 fi
-echo "AFD origin status is ${private_link_status}; ACA approval and AFD health determine readiness"
 
 public_network_access=$(az containerapp env show \
   --resource-group "$PYRIT_DEPLOYMENT_RESOURCE_GROUP" \
   --name "$PYRIT_APP_NAME-env" \
   --query properties.publicNetworkAccess -o tsv)
-if [[ "$public_network_access" != "Disabled" ]]; then
-  echo "##vso[task.logissue type=error]ACA environment public network access remains enabled"
+if [[ "$public_network_access" != "$expected_public_access" ]]; then
+  echo "##vso[task.logissue type=error]ACA environment public network access differs from the expected mode"
   exit 1
 fi
 
+revision=$(az containerapp show \
+  --resource-group "$PYRIT_DEPLOYMENT_RESOURCE_GROUP" \
+  --name "$PYRIT_APP_NAME" --query properties.latestRevisionName -o tsv)
+if [[ -z "$revision" || "$revision" == "null" || "$revision" == "None" ]]; then
+  echo "##vso[task.logissue type=error]Container App did not report a revision"
+  exit 1
+fi
+if [[ "$PYRIT_DEPLOY_INFRA" == "true" && "$revision" != "$current_revision" ]]; then
+  echo "##vso[task.logissue type=error]Infrastructure-only deployment changed the running app revision"
+  exit 1
+fi
 health=""
 for attempt in {1..5}; do
-  health=$(az containerapp revision list \
+  revision_state=$(az containerapp revision show \
     --resource-group "$PYRIT_DEPLOYMENT_RESOURCE_GROUP" \
-    --name "$PYRIT_APP_NAME" \
-    --query "[?properties.template.containers[0].image=='$immutable_image'] | sort_by(@,&properties.createdTime)[-1].properties.healthState" \
-    -o tsv || true)
-  echo "Revision health attempt $attempt/5: ${health:-<not-found>}"
+    --name "$PYRIT_APP_NAME" --revision "$revision" \
+    --query '{image:properties.template.containers[0].image,health:properties.healthState}' -o json)
+  if [[ "$(jq -r '.image' <<< "$revision_state")" != "$immutable_image" ]]; then
+    echo "##vso[task.logissue type=error]Deployed revision does not contain the requested image"
+    exit 1
+  fi
+  health=$(jq -r '.health // empty' <<< "$revision_state")
+  echo "Revision $revision health attempt $attempt/5: ${health:-<not-found>}"
   [[ "$health" == "Healthy" ]] && break
   [[ "$attempt" -lt 5 ]] && sleep 120
 done
@@ -549,40 +635,74 @@ actual_pip_id=$(az network public-ip show \
   --resource-group "$PYRIT_DEPLOYMENT_RESOURCE_GROUP" \
   --name "$PYRIT_APP_NAME-egress-pip" --query id -o tsv)
 normalized_actual_pip_id=$(lowercase "$actual_pip_id")
-if [[ "$egress_ip" != "$expected_egress_ip" \
-  || "$normalized_actual_pip_id" != "$normalized_expected_pip_id" ]]; then
+if [[ "$egress_ip" != "$expected_egress_ip" ||
+  "$normalized_actual_pip_id" != "$normalized_expected_pip_id" ]]; then
   echo "##vso[task.logissue type=error]Reserved egress PIP identity or address changed"
   exit 1
 fi
-front_door_health=""
-front_door_health_timeout_seconds=1800
-front_door_health_deadline=$((SECONDS + front_door_health_timeout_seconds))
+health_url="https://$app_fqdn/api/health"
+if [[ "$expected_public_access" == "Disabled" ]]; then
+  if [[ ! "$front_door_fqdn" =~ ^[a-z0-9][a-z0-9.-]*\.azurefd\.net$ ]]; then
+    echo "##vso[task.logissue type=error]Private ACA access requires a valid Front Door hostname"
+    exit 1
+  fi
+  health_url="https://$front_door_fqdn/api/health"
+fi
+if [[ ! "$app_fqdn" =~ ^[a-z0-9][a-z0-9.-]*\.azurecontainerapps\.io$ ]]; then
+  echo "##vso[task.logissue type=error]Deployment returned an invalid ACA hostname"
+  exit 1
+fi
+application_health=""
+health_timeout_seconds=300
+[[ "$PYRIT_DEPLOY_INFRA" == "true" ]] && health_timeout_seconds=1800
+health_deadline=$((SECONDS + health_timeout_seconds))
 attempt=0
-while ((SECONDS < front_door_health_deadline)); do
+while ((SECONDS < health_deadline)); do
   ((attempt += 1))
-  remaining_seconds=$((front_door_health_deadline - SECONDS))
+  remaining_seconds=$((health_deadline - SECONDS))
   request_timeout=$((remaining_seconds < 30 ? remaining_seconds : 30))
-  front_door_health=$(curl \
+  if ! application_health=$(curl \
     --silent --show-error --output /dev/null --write-out '%{http_code}' \
-    --max-time "$request_timeout" "https://$front_door_fqdn/api/health" || true)
-  echo "Front Door health attempt $attempt (${remaining_seconds}s budget before request): ${front_door_health:-<connection-failed>}"
-  [[ "$front_door_health" == "200" ]] && break
-  remaining_seconds=$((front_door_health_deadline - SECONDS))
+    --max-time "$request_timeout" "$health_url"); then
+    application_health=""
+  fi
+  echo "Application health at $health_url attempt $attempt (${remaining_seconds}s budget before request): ${application_health:-<connection-failed>}"
+  [[ "$application_health" == "200" ]] && break
+  remaining_seconds=$((health_deadline - SECONDS))
   ((remaining_seconds > 0)) || break
   sleep_seconds=$((remaining_seconds < 30 ? remaining_seconds : 30))
   sleep "$sleep_seconds"
 done
-if [[ "$front_door_health" != "200" ]]; then
-  echo "##vso[task.logissue type=error]Front Door did not route a healthy response"
+if [[ "$application_health" != "200" ]]; then
+  echo "##vso[task.logissue type=error]Application endpoint did not return a healthy response"
   exit 1
 fi
-direct_aca_health=$(curl \
-  --silent --show-error --output /dev/null --write-out '%{http_code}' \
-  --max-time 15 "https://$app_fqdn/api/health" || true)
-if [[ "$direct_aca_health" == "200" ]]; then
-  echo "##vso[task.logissue type=error]Direct ACA public access remains reachable"
+if [[ "$expected_public_access" == "Disabled" ]]; then
+  direct_aca_health=$(curl \
+    --silent --show-error --output /dev/null --write-out '%{http_code}' \
+    --max-time 15 "https://$app_fqdn/api/health" || true)
+  if [[ "$direct_aca_health" == "200" ]]; then
+    echo "##vso[task.logissue type=error]Direct ACA public access remains reachable"
+    exit 1
+  fi
+fi
+final_app=$(az containerapp show \
+  --resource-group "$PYRIT_DEPLOYMENT_RESOURCE_GROUP" --name "$PYRIT_APP_NAME" \
+  --query '{latest:properties.latestRevisionName,ready:properties.latestReadyRevisionName,image:properties.template.containers[0].image}' -o json)
+final_access=$(az containerapp env show \
+  --resource-group "$PYRIT_DEPLOYMENT_RESOURCE_GROUP" --name "$PYRIT_APP_NAME-env" \
+  --query properties.publicNetworkAccess -o tsv)
+if [[ "$(jq -r '.latest' <<< "$final_app")" != "$revision" ||
+"$(jq -r '.ready' <<< "$final_app")" != "$revision" ||
+"$(jq -r '.image' <<< "$final_app")" != "$immutable_image" ||
+"$final_access" != "$expected_public_access" ]]; then
+  echo "##vso[task.logissue type=error]Verified image is not the current ready revision or the access mode changed"
   exit 1
 fi
 cutover_in_progress=false
 trap - EXIT TERM INT
-echo "Deployment healthy; public URL: https://$front_door_fqdn; ACA public access: disabled; egress IPv4: $egress_ip"
+if [[ "$PYRIT_DEPLOY_INFRA" == "true" ]]; then
+  echo "Infrastructure healthy; app revision unchanged: $revision; verified $health_url; egress IPv4: $egress_ip"
+else
+  echo "Deployment healthy: $revision; verified $health_url; ACA public access: $expected_public_access; egress IPv4: $egress_ip"
+fi

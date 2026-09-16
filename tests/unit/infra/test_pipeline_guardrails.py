@@ -2,6 +2,7 @@
 # Licensed under the MIT license.
 """Guard the independent application and infrastructure deployment contract."""
 
+import itertools
 import json
 import os
 import re
@@ -16,7 +17,7 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 PIPELINE = REPO_ROOT / "gui-deploy.yml"
-DEPLOY_SCRIPT = REPO_ROOT / "infra" / "pipelines" / "deploy_public_nat.sh"
+DEPLOY_SCRIPT = REPO_ROOT / "infra" / "pipelines" / "deploy_gui.sh"
 INFRA_TEMPLATE = REPO_ROOT / "infra" / "pipelines" / "deploy-infra.yml"
 WHAT_IF_VALIDATOR = REPO_ROOT / "infra" / "pipelines" / "validate_what_if.py"
 EXAMPLE_PARAMETERS = REPO_ROOT / "infra" / "parameters.example.json"
@@ -50,55 +51,143 @@ class TestPipelineGuardrails(unittest.TestCase):
     """Verify one preview-first test/prod deployment workflow."""
 
     @classmethod
-    def setUpClass(cls):
+    def setUpClass(cls) -> None:
         cls.pipeline = PIPELINE.read_text(encoding="utf-8")
         cls.deploy_script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
         cls.infra_template = INFRA_TEMPLATE.read_text(encoding="utf-8")
+        cls.pipeline_yaml = yaml.safe_load(cls.pipeline)
+        cls.infra_yaml = yaml.safe_load(cls.infra_template)
 
-    def test_pipeline_has_one_test_and_prod_workflow(self):
+    def test_pipeline_has_one_test_and_prod_workflow(self) -> None:
         assert "deploymentTarget" not in self.pipeline
         assert "applyReplacement" not in self.pipeline
-        assert "stage: Build" in self.pipeline
-        assert "stage: DeployTest" in self.pipeline
-        assert "stage: ApproveProd" in self.pipeline
-        assert "stage: DeployProd" in self.pipeline
-        assert "DeployReplacement" not in self.pipeline
-        assert self.pipeline.count("timeoutInMinutes: 120") == 2
-        assert (
-            self.pipeline.count('inlineScript: python3 "$(Build.SourcesDirectory)/infra/pipelines/deploy_code.py"') == 2
-        )
-        assert "deploy_public_nat.sh" not in self.pipeline
-        assert "scriptPath: '$(Build.SourcesDirectory)/infra/pipelines/deploy_public_nat.sh'" in self.infra_template
+        stages = self.pipeline_yaml["stages"]
+        assert [stage.get("stage") or stage["parameters"]["stageName"] for stage in stages] == [
+            "ValidateInputs",
+            "Build",
+            "DeployTestInfra",
+            "DeployTest",
+            "ApproveProd",
+            "DeployProdInfra",
+            "DeployProd",
+        ]
+        deployment_stages = [stage for stage in stages if stage.get("stage") in {"DeployTest", "DeployProd"}]
+        deployment_stages += self.infra_yaml["stages"]
+        for stage in deployment_stages:
+            job = stage["jobs"][0]
+            assert "deployment" in job
+            assert job["timeoutInMinutes"] == 120
+            steps = job["strategy"]["runOnce"]["deploy"]["steps"]
+            task = next(step for step in steps if step.get("task") == "AzureCLI@2")
+            assert task["inputs"] == {
+                "azureSubscription": "$(azureServiceConnection)",
+                "scriptType": "bash",
+                "scriptLocation": "scriptPath",
+                "scriptPath": "$(Build.SourcesDirectory)/infra/pipelines/deploy_gui.sh",
+            }
+            is_infrastructure = stage in self.infra_yaml["stages"]
+            assert task["env"]["PYRIT_DEPLOY_INFRA"] == ("true" if is_infrastructure else "false")
+            if is_infrastructure:
+                assert "PYRIT_CONTAINER_IMAGE" not in task["env"]
+            else:
+                assert task["env"]["PYRIT_CONTAINER_IMAGE"] == "$(immutableImage)"
+        assert "deploy_code.py" not in self.pipeline
+        assert "deploy_public_nat.sh" not in self.pipeline + self.infra_template
 
     def test_infrastructure_is_explicit_and_runs_before_code(self) -> None:
-        pipeline = yaml.safe_load(self.pipeline)
+        pipeline = self.pipeline_yaml
         parameters = {parameter["name"]: parameter for parameter in pipeline["parameters"]}
         assert parameters["deployInfra"]["default"] is False
         assert parameters["deployToProd"]["default"] is False
         stages = pipeline["stages"]
-        conditional = "${{ if eq(parameters.deployInfra, true) }}"
-        infrastructure = [stage[conditional][0] for stage in stages if conditional in stage]
+        infrastructure = [stage for stage in stages if "template" in stage]
         assert [stage["parameters"] for stage in infrastructure] == [
-            {"stageName": "DeployTestInfra", "dependsOn": "Build", "slot": "test"},
-            {"stageName": "DeployProdInfra", "dependsOn": "ApproveProd", "slot": "prod"},
+            {
+                "stageName": "DeployTestInfra",
+                "dependsOn": "Build",
+                "slot": "test",
+                "deployInfra": "${{ parameters.deployInfra }}",
+            },
+            {
+                "stageName": "DeployProdInfra",
+                "dependsOn": "ApproveProd",
+                "slot": "prod",
+                "deployInfra": "${{ parameters.deployInfra }}",
+            },
         ]
         assert all(stage["template"] == "infra/pipelines/deploy-infra.yml" for stage in infrastructure)
         code_stages = {stage["stage"]: stage for stage in stages if stage.get("stage") in {"DeployTest", "DeployProd"}}
-        assert code_stages["DeployTest"]["dependsOn"] == ["Build", {conditional: ["DeployTestInfra"]}]
-        assert code_stages["DeployProd"]["dependsOn"] == [
-            "ApproveProd",
-            "Build",
-            {conditional: ["DeployProdInfra"]},
-        ]
-        template = yaml.safe_load(self.infra_template)["stages"][0]
+        assert code_stages["DeployTest"]["dependsOn"] == ["Build", "DeployTestInfra"]
+        assert code_stages["DeployProd"]["dependsOn"] == ["ApproveProd", "Build", "DeployProdInfra"]
+        template = self.infra_yaml["stages"][0]
         assert template["dependsOn"] == "${{ parameters.dependsOn }}"
-        assert "condition" not in template  # Infrastructure must not run after a skipped approval.
+        assert " ".join(template["condition"].split()) == (
+            "and(succeeded(), eq('${{ parameters.deployInfra }}', 'true'))"
+        )
         assert "PYRIT_CONTAINER_IMAGE" not in self.infra_template
         assert "current_image=$(jq" in self.deploy_script
-        assert "retaining current image" in self.deploy_script
-        assert "PYRIT_CONTAINER_IMAGE" not in self.deploy_script
+        assert "leaving the running application unchanged" in self.deploy_script
+        assert "requested_image=$current_image" in self.deploy_script
+        assert "requested_image=${PYRIT_CONTAINER_IMAGE:-}" in self.deploy_script
+        assert '"deployInfra=$PYRIT_DEPLOY_INFRA"' in self.deploy_script
+        assert '"deployApp=$deploy_app"' in self.deploy_script
+        assert (
+            'if [[ "$deploy_app" == "true" ]]; then\n  parameters+=("containerImage=$immutable_image")\nfi'
+            in self.deploy_script
+        )
+        assert "az containerapp update" not in self.deploy_script
 
-    def test_production_remains_opt_in_and_independently_approved(self):
+    def test_app_stage_conditions_distinguish_failure_cancellation_and_intentional_skip(self) -> None:
+        success = {"Succeeded", "SucceededWithIssues"}
+        results = ["Succeeded", "SucceededWithIssues", "Failed", "Canceled", "Skipped"]
+        for stage in self.pipeline_yaml["stages"]:
+            if stage.get("stage") not in {"DeployTest", "DeployProd"}:
+                continue
+            infrastructure = stage["stage"] + "Infra"
+            condition = " ".join(stage["condition"].split())
+            for deploy_infra, canceled, build, infra, approval in itertools.product(
+                (False, True),
+                (False, True),
+                results,
+                results,
+                results,
+            ):
+                with self.subTest(
+                    stage=stage["stage"],
+                    flag=deploy_infra,
+                    canceled=canceled,
+                    build=build,
+                    infra=infra,
+                    approval=approval,
+                ):
+                    expression = condition.replace("not(canceled())", str(not canceled))
+                    expression = expression.replace(
+                        "eq('${{ parameters.deployInfra }}', 'false')", str(not deploy_infra)
+                    )
+                    expression = expression.replace(
+                        f"eq(dependencies.{infrastructure}.result, 'Skipped')",
+                        str(infra == "Skipped"),
+                    )
+                    for dependency, outcome in (("Build", build), (infrastructure, infra), ("ApproveProd", approval)):
+                        expression = expression.replace(
+                            f"in(dependencies.{dependency}.result, 'Succeeded', 'SucceededWithIssues')",
+                            str(outcome in success),
+                        )
+                    expression = expression.replace("and(", "all_(").replace("or(", "any_(")
+                    # Evaluate only these two known conditions, not a general Azure expression language.
+                    assert re.fullmatch(r"(?:True|False|all_|any_|[(),\s])+", expression), expression
+                    actual = eval(
+                        expression, {"__builtins__": {}, "all_": lambda *v: all(v), "any_": lambda *v: any(v)}
+                    )
+                    expected = (
+                        not canceled
+                        and build in success
+                        and (infra in success or (not deploy_infra and infra == "Skipped"))
+                        and (stage["stage"] != "DeployProd" or approval in success)
+                    )
+                    assert actual is expected
+
+    def test_production_remains_opt_in_and_independently_approved(self) -> None:
         assert "job: ValidateProdConfiguration" in self.pipeline
         assert "copyrit-gui-prod must define prodApprovers" in self.pipeline
         assert "PROD_APPROVERS: $(prodApprovers)" in self.pipeline
@@ -108,16 +197,18 @@ class TestPipelineGuardrails(unittest.TestCase):
         assert "approvers: '$(prodApprovers)'" in self.pipeline
         assert "allowApproversToApproveTheirOwnRuns: false" in self.pipeline
         assert "dependsOn: ValidateProdConfiguration" in self.pipeline
-        approval_stage = self.pipeline[
-            self.pipeline.index("stage: ApproveProd") : self.pipeline.index("stage: DeployProd")
-        ]
-        assert "- group: copyrit-gui-prod" in approval_stage
+        approval_stage = next(stage for stage in self.pipeline_yaml["stages"] if stage.get("stage") == "ApproveProd")
+        assert approval_stage["dependsOn"] == "DeployTest"
+        assert {"group": "copyrit-gui-prod"} in approval_stage["variables"]
+        assert " ".join(approval_stage["condition"].split()) == (
+            "and(succeeded('DeployTest'), eq('${{ parameters.deployToProd }}', 'true'), "
+            "eq(variables['Build.SourceBranch'], 'refs/heads/main'))"
+        )
         assert '"$BUILD_SOURCEBRANCH" != refs/heads/main' in self.pipeline
         assert "eq(variables['Build.SourceBranch'], 'refs/heads/main')" in self.pipeline
         assert "refs/heads/releases/" not in self.pipeline
-        assert "condition: and(succeeded(), succeeded('ApproveProd'))" in self.pipeline
 
-    def test_deploy_resolves_digest_and_previews_before_apply(self):
+    def test_deploy_resolves_digest_and_previews_before_apply(self) -> None:
         assert "name: BuildImage" in self.pipeline
         assert "variable=immutableImage;isOutput=true" in self.pipeline
         assert "stageDependencies.Build.BuildAndPush.outputs['BuildImage.immutableImage']" in self.pipeline
@@ -133,10 +224,10 @@ class TestPipelineGuardrails(unittest.TestCase):
         assert "cross-resource-group write" in self.deploy_script
         assert "networkMode=" not in self.deploy_script
         assert "enablePrivateEndpoint=" not in self.deploy_script
-        assert '"enableFrontDoor=true"' in self.deploy_script
-        assert '"enableFrontDoorPrivateLink=true"' in self.deploy_script
+        assert '"enableFrontDoor=$enable_front_door"' in self.deploy_script
+        assert '"enableFrontDoorPrivateLink=$enable_private_link"' in self.deploy_script
         assert '"frontDoorPrivateLinkRequestMessage=$private_link_request_message"' in self.deploy_script
-        assert '"disableContainerAppsPublicAccess=true"' in self.deploy_script
+        assert '"disableContainerAppsPublicAccess=$disable_public_access"' in self.deploy_script
 
     def test_pipeline_passes_values_via_environment(self):
         deploy_yaml = self.infra_template
@@ -182,13 +273,13 @@ class TestPipelineGuardrails(unittest.TestCase):
         assert self.deploy_script.index("expected_egress_ip=") < self.deploy_script.index("az deployment group what-if")
         assert self.deploy_script.index("actual_pip_id=") > self.deploy_script.index("az deployment group create")
 
-    def test_data_plane_health_probe_respects_ingress_restrictions(self):
+    def test_data_plane_health_probe_respects_ingress_restrictions(self) -> None:
         assert "properties.outputs.frontDoorFqdn.value" in self.deploy_script
         assert '"https://$front_door_fqdn/api/health"' in self.deploy_script
         assert "direct_aca_health=$(curl" in self.deploy_script
         assert '"https://$app_fqdn/api/health"' in self.deploy_script
         assert '[[ "$direct_aca_health" == "200" ]]' in self.deploy_script
-        assert "Front Door did not route a healthy response" in self.deploy_script
+        assert "Application endpoint did not return a healthy response" in self.deploy_script
         assert "aca_private_endpoint_approval.bicep" in self.deploy_script
         assert "connection_suffix=${connection_name:0:8}" in self.deploy_script
         assert '"$deployment_name-private-link-approval-$connection_suffix"' in self.deploy_script
@@ -214,26 +305,32 @@ class TestPipelineGuardrails(unittest.TestCase):
         assert self.deploy_script.index(deletion_guard) < self.deploy_script.index(
             'if az deployment group create \\\n      --name "$deployment_name-rollback"'
         )
-        assert "front_door_health_timeout_seconds=1800" in self.deploy_script
-        assert "front_door_health_deadline=$((SECONDS + front_door_health_timeout_seconds))" in self.deploy_script
-        assert "while ((SECONDS < front_door_health_deadline))" in self.deploy_script
+        assert "health_timeout_seconds=300" in self.deploy_script
+        assert '[[ "$PYRIT_DEPLOY_INFRA" == "true" ]] && health_timeout_seconds=1800' in self.deploy_script
+        assert "health_deadline=$((SECONDS + health_timeout_seconds))" in self.deploy_script
+        assert "while ((SECONDS < health_deadline))" in self.deploy_script
         assert "budget before request" in self.deploy_script
         assert "Front Door health attempt $attempt/60" not in self.deploy_script
         assert "Direct ACA public access remains reachable" in self.deploy_script
-        assert "ACA public access: disabled" in self.deploy_script
+        assert "ACA public access: $expected_public_access" in self.deploy_script
+        assert (
+            'if [[ "$PYRIT_DEPLOY_INFRA" == "true" ]]; then\n'
+            "  trap rollback_public_origin EXIT\n"
+            "  trap 'exit 143' TERM\n"
+            "  trap 'exit 130' INT\n"
+            "  cutover_in_progress=true\nfi"
+        ) in self.deploy_script
 
     def _run_cancellation_rollback(self, *, connection_count: int) -> tuple[subprocess.CompletedProcess[str], str]:
         assert BASH is not None
         lowercase_start = self.deploy_script.index("lowercase() {")
         lowercase_end = self.deploy_script.index("\n}\n", lowercase_start) + len("\n}\n")
         function_start = self.deploy_script.index("rollback_public_origin() {")
-        trap_start = self.deploy_script.index("trap rollback_public_origin EXIT", function_start)
-        trap_end = self.deploy_script.index("cutover_in_progress=true", trap_start)
+        function_end = self.deploy_script.index("\n}\n", function_start) + len("\n}\n")
         lowercase_function = self.deploy_script[lowercase_start:lowercase_end]
-        rollback_function = self.deploy_script[function_start:trap_start]
-        trap_setup = self.deploy_script[trap_start:trap_end]
+        rollback_function = self.deploy_script[function_start:function_end]
 
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(prefix=".deployment-test-", dir=REPO_ROOT) as directory:
             call_log = Path(directory) / "az-calls.log"
             harness = f"""
 set -euo pipefail
@@ -247,7 +344,7 @@ expected_environment_id='/subscriptions/test/resourceGroups/copyrit-test-rg/prov
 normalized_expected_environment_id=$(lowercase "$expected_environment_id")
 deployment_name='pyrit-test-1'
 deployment_tags='{{}}'
-rollback_parameters=('disableContainerAppsPublicAccess=false')
+rollback_parameters=('deployInfra=true' 'deployApp=false' 'disableContainerAppsPublicAccess=false')
 
 az() {{
     printf '%s\n' "$*" >> "$AZ_CALLS"
@@ -266,19 +363,23 @@ jq() {{
 sleep() {{ :; }}
 
 {rollback_function}
-{trap_setup}
+trap rollback_public_origin EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
 cutover_in_progress=true
 kill -TERM $$
 """
             environment = os.environ.copy()
-            environment["AZ_CALLS"] = str(call_log)
+            environment["AZ_CALLS"] = call_log.as_posix()
+            environment["MSYS2_ARG_CONV_EXCL"] = "*"
             result = subprocess.run(
-                [BASH, "-s"],
+                [BASH, "--noprofile", "--norc", "-s"],
                 input=harness,
                 capture_output=True,
                 text=True,
                 check=False,
                 env=environment,
+                timeout=30,
             )
 
             calls = call_log.read_text(encoding="utf-8")
@@ -303,6 +404,9 @@ kill -TERM $$
         assert "rest --method delete" in calls
         assert re.search(r"--name pyrit-test-1-rollback(?:\s|$)", calls)
         assert "disableContainerAppsPublicAccess=false" in calls
+        assert "deployApp=false" in calls
+        assert "containerImage=" not in calls
+        assert "--mode Incremental" in calls
 
     def test_manual_parameter_files_use_the_single_topology(self):
         example = json.loads(EXAMPLE_PARAMETERS.read_text(encoding="utf-8"))
@@ -340,7 +444,7 @@ kill -TERM $$
         *,
         expected_subnet_id: str = SUBNET_ID,
     ) -> subprocess.CompletedProcess[str]:
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(prefix=".deployment-test-", dir=REPO_ROOT) as directory:
             what_if_file = Path(directory) / "what-if.json"
             what_if_file.write_text(json.dumps({"changes": changes}), encoding="utf-8")
             return subprocess.run(

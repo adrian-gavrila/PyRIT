@@ -8,11 +8,15 @@ parameters:
     values:
       - test
       - prod
+  - name: deployInfra
+    type: boolean
+    default: false
 
 stages:
   - stage: ${{ parameters.stageName }}
     displayName: 'Deploy ${{ parameters.slot }} infrastructure'
     dependsOn: ${{ parameters.dependsOn }}
+    condition: and(succeeded(), eq('${{ parameters.deployInfra }}', 'true'))
     variables:
       - group: copyrit-gui-common
       - group: copyrit-gui-${{ parameters.slot }}
@@ -20,7 +24,7 @@ stages:
       vmImage: 'ubuntu-latest'
     jobs:
       - deployment: DeployInfrastructure
-        displayName: 'Preview, deploy, and verify infrastructure with the current image'
+        displayName: 'Preview, deploy, and verify infrastructure without redeploying the app'
         timeoutInMinutes: 120
         environment: 'copyrit-${{ parameters.slot }}'
         strategy:
@@ -33,6 +37,7 @@ stages:
                   displayName: 'Preview, deploy, and verify ${{ parameters.slot }} infrastructure'
                   env:
                     PYRIT_SLOT: ${{ parameters.slot }}
+                    PYRIT_DEPLOY_INFRA: 'true'
                     PYRIT_BUILD_ID: $(Build.BuildId)
                     PYRIT_SOURCE_DIRECTORY: $(Build.SourcesDirectory)
                     PYRIT_AGENT_TEMP_DIRECTORY: $(Agent.TempDirectory)
@@ -57,4 +62,4 @@ stages:
                     azureSubscription: '$(azureServiceConnection)'
                     scriptType: 'bash'
                     scriptLocation: 'scriptPath'
-                    scriptPath: '$(Build.SourcesDirectory)/infra/pipelines/deploy_public_nat.sh'
+                    scriptPath: '$(Build.SourcesDirectory)/infra/pipelines/deploy_gui.sh'

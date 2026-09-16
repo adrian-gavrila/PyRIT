@@ -41,9 +41,19 @@ param appName string = 'pyrit-gui'
 @description('Azure region for all resources')
 param location string = resourceGroup().location
 
-@description('Container image — must use a unique tag (commit SHA) or digest, never :latest. Enforce in CI pipeline.')
+@description('Container image, required when deployApp is true — must use a unique tag (commit SHA) or digest, never :latest. Enforce in CI pipeline.')
 @metadata({ example: 'myacr.azurecr.io/pyrit:a1b2c3d or myacr.azurecr.io/pyrit@sha256:...' })
-param containerImage string
+param containerImage string = ''
+
+@description('Reconcile shared infrastructure. False requires an existing environment, managed identity, and registry.')
+param deployInfra bool = true
+
+@description('Deploy the Container App image and configuration. False leaves the existing application untouched.')
+param deployApp bool = true
+
+var effectiveContainerImage = deployApp && empty(containerImage)
+  ? fail('containerImage is required when deployApp is true')
+  : containerImage
 
 @description('Entra ID tenant ID')
 param entraTenantId string
@@ -179,20 +189,26 @@ var effectiveAllowedCidr = enableFrontDoor && !empty(allowedCidr)
 var effectiveFrontDoorPrivateLink = enableFrontDoorPrivateLink && !enableFrontDoor
   ? fail('enableFrontDoor must be true when enableFrontDoorPrivateLink is true')
   : enableFrontDoorPrivateLink
-var effectiveContainerAppsPublicAccess = disableContainerAppsPublicAccess
-  ? (effectiveFrontDoorPrivateLink ? 'Disabled' : fail('Front Door Private Link is required before ACA public access can be disabled'))
-  : 'Enabled'
+var effectiveContainerAppsPublicAccess = deployInfra
+  ? (disableContainerAppsPublicAccess
+    ? (effectiveFrontDoorPrivateLink ? 'Disabled' : fail('Front Door Private Link is required before ACA public access can be disabled'))
+    : 'Enabled')
+  : existingAcaEnvironment!.properties.publicNetworkAccess
 var createLogAnalytics = logAnalyticsWorkspaceId == ''
 var createAcr = acrResourceId == '' && acrName == ''
+  ? (deployInfra ? true : fail('App-only deployment requires an existing registry'))
+  : false
 var useInlineEnvFile = !empty(envFileContents)
 var createManagedIdentity = empty(existingManagedIdentityResourceId)
+  ? (deployInfra ? true : fail('App-only deployment requires existingManagedIdentityResourceId'))
+  : false
 var generatedAcrName = '${padLeft(replace(appName, '-', ''), 2, 'p')}acr'
 var existingManagedIdentitySegments = split(existingManagedIdentityResourceId, '/')
 var existingManagedIdentitySubscriptionId = createManagedIdentity ? subscription().subscriptionId : existingManagedIdentitySegments[2]
 var existingManagedIdentityResourceGroupName = createManagedIdentity ? resourceGroup().name : existingManagedIdentitySegments[4]
 var existingManagedIdentityName = createManagedIdentity ? '' : last(existingManagedIdentitySegments)
 
-module acaNatNetwork './modules/aca_nat_network.bicep' = {
+module acaNatNetwork './modules/aca_nat_network.bicep' = if (deployInfra) {
   name: '${appName}-aca-nat-network'
   params: {
     namePrefix: appName
@@ -232,7 +248,7 @@ var effectiveAcrServer = '${effectiveAcrName}.azurecr.io'
 // The key is used during deployment for log ingestion config only — it is NOT
 // injected into the container or accessible to application code.
 // ============================================================================
-resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = if (createLogAnalytics) {
+resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = if (deployInfra && createLogAnalytics) {
   name: '${appName}-logs'
   location: location
   tags: tags
@@ -250,7 +266,7 @@ var effectiveLogAnalyticsKeyValue = createLogAnalytics ? logAnalytics!.listKeys(
 // ============================================================================
 // Application Insights (created when OTel is enabled — destination for traces/logs)
 // ============================================================================
-resource appInsights 'Microsoft.Insights/components@2020-02-02' = if (enableOtel) {
+resource appInsights 'Microsoft.Insights/components@2020-02-02' = if (deployInfra && enableOtel) {
   name: '${appName}-ai'
   location: location
   tags: tags
@@ -312,7 +328,7 @@ var keyVaultName = last(split(keyVaultResourceId, '/'))
 // OTel: When enableOtel=true, configure the managed OTel agent
 // as a post-deploy CLI step (2024-03-01 schema does not support it natively).
 // ============================================================================
-resource acaEnvironment 'Microsoft.App/managedEnvironments@2024-10-02-preview' = {
+resource acaEnvironment 'Microsoft.App/managedEnvironments@2024-10-02-preview' = if (deployInfra) {
   name: '${appName}-env'
   location: location
   tags: tags
@@ -349,9 +365,16 @@ resource acaEnvironment 'Microsoft.App/managedEnvironments@2024-10-02-preview' =
   }
 }
 
-var acaOriginHostName = '${appName}.${acaEnvironment.properties.defaultDomain}'
+resource existingAcaEnvironment 'Microsoft.App/managedEnvironments@2024-10-02-preview' existing = if (!deployInfra) {
+  name: '${appName}-env'
+}
 
-module acaFrontDoor './modules/aca_front_door.bicep' = if (enableFrontDoor) {
+var environmentDefaultDomain = deployInfra
+  ? acaEnvironment!.properties.defaultDomain
+  : existingAcaEnvironment!.properties.defaultDomain
+var acaOriginHostName = '${appName}.${environmentDefaultDomain}'
+
+module acaFrontDoor './modules/aca_front_door.bicep' = if (deployInfra && enableFrontDoor) {
   name: '${appName}-aca-front-door'
   params: {
     namePrefix: appName
@@ -364,6 +387,22 @@ module acaFrontDoor './modules/aca_front_door.bicep' = if (enableFrontDoor) {
   }
 }
 
+resource existingFrontDoorEndpoint 'Microsoft.Cdn/profiles/afdEndpoints@2024-09-01' existing = if (!deployInfra && enableFrontDoor) {
+  name: '${appName}-afd/${appName}-${take(uniqueString(subscription().id, resourceGroup().id, appName), 8)}'
+}
+
+var frontDoorHostName = enableFrontDoor
+  ? (deployInfra ? acaFrontDoor!.outputs.endpointHostName : existingFrontDoorEndpoint!.properties.hostName)
+  : ''
+
+resource existingEgressPublicIp 'Microsoft.Network/publicIPAddresses@2024-05-01' existing = if (!deployInfra) {
+  name: '${appName}-egress-pip'
+}
+
+resource existingAppInsights 'Microsoft.Insights/components@2020-02-02' existing = if (!deployInfra && enableOtel) {
+  name: '${appName}-ai'
+}
+
 // NOTE: When enableOtel=true, configure the OpenTelemetry managed agent on the
 // environment as a post-deployment step using az CLI:
 //   az containerapp env telemetry app-insights set \
@@ -374,7 +413,7 @@ module acaFrontDoor './modules/aca_front_door.bicep' = if (enableFrontDoor) {
 // ============================================================================
 // Container App — PyRIT GUI
 // ============================================================================
-resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
+resource containerApp 'Microsoft.App/containerApps@2024-03-01' = if (deployApp) {
   name: appName
   location: location
   tags: tags
@@ -437,7 +476,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
       containers: [
         {
           name: 'pyrit-gui'
-          image: containerImage
+          image: effectiveContainerImage
           resources: {
             cpu: json(cpuCores)
             memory: '${memoryGb}Gi'
@@ -517,8 +556,8 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
               name: 'PYRIT_CORS_ORIGINS'
               value: enableFrontDoor
                 ? (effectiveContainerAppsPublicAccess == 'Disabled'
-                  ? 'https://${acaFrontDoor!.outputs.endpointHostName}'
-                  : 'https://${acaOriginHostName},https://${acaFrontDoor!.outputs.endpointHostName}')
+                  ? 'https://${frontDoorHostName}'
+                  : 'https://${acaOriginHostName},https://${frontDoorHostName}')
                 : 'https://${acaOriginHostName}'
             }
           ]
@@ -531,6 +570,14 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
     }
   }
 }
+
+resource existingContainerApp 'Microsoft.App/containerApps@2024-03-01' existing = if (!deployApp) {
+  name: appName
+}
+
+var appHostName = deployApp
+  ? containerApp!.properties.configuration.ingress.fqdn
+  : existingContainerApp!.properties.configuration.ingress.fqdn
 
 // ============================================================================
 // NOTE: Easy Auth (authConfigs) is intentionally NOT used.
@@ -548,16 +595,16 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
 // ============================================================================
 
 @description('The generated ACA FQDN; inaccessible when ACA public network access is disabled')
-output appFqdn string = containerApp.properties.configuration.ingress.fqdn
+output appFqdn string = appHostName
 
 @description('The Azure Front Door managed HTTPS hostname')
-output frontDoorFqdn string = enableFrontDoor ? acaFrontDoor!.outputs.endpointHostName : ''
+output frontDoorFqdn string = frontDoorHostName
 
 @description('The Azure Front Door public URL')
-output frontDoorUrl string = enableFrontDoor ? 'https://${acaFrontDoor!.outputs.endpointHostName}' : ''
+output frontDoorUrl string = enableFrontDoor ? 'https://${frontDoorHostName}' : ''
 
 @description('The deterministic ACA Private Link approval request message; empty when Private Link is disabled')
-output frontDoorPrivateLinkRequestMessage string = effectiveFrontDoorPrivateLink
+output frontDoorPrivateLinkRequestMessage string = deployInfra && effectiveFrontDoorPrivateLink
   ? acaFrontDoor!.outputs.privateLinkRequestMessage
   : ''
 
@@ -565,19 +612,19 @@ output frontDoorPrivateLinkRequestMessage string = effectiveFrontDoorPrivateLink
 output containerAppsPublicNetworkAccess string = effectiveContainerAppsPublicAccess
 
 @description('The public application FQDN selected for this deployment')
-output publicFqdn string = enableFrontDoor ? acaFrontDoor!.outputs.endpointHostName : containerApp.properties.configuration.ingress.fqdn
+output publicFqdn string = enableFrontDoor ? frontDoorHostName : appHostName
 
 @description('The default domain of the ACA environment')
-output environmentDefaultDomain string = acaEnvironment.properties.defaultDomain
+output environmentDefaultDomain string = environmentDefaultDomain
 
 @description('Static outbound IPv4 address')
-output egressPublicIpAddress string = acaNatNetwork!.outputs.egressPublicIpAddress
+output egressPublicIpAddress string = deployInfra ? acaNatNetwork!.outputs.egressPublicIpAddress : existingEgressPublicIp!.properties.ipAddress
 
 @description('NAT Gateway resource ID')
-output natGatewayId string = acaNatNetwork!.outputs.natGatewayId
+output natGatewayId string = deployInfra ? acaNatNetwork!.outputs.natGatewayId : resourceId('Microsoft.Network/natGateways', '${appName}-nat')
 
 @description('ACA infrastructure subnet resource ID')
-output acaInfrastructureSubnetId string = acaNatNetwork!.outputs.infrastructureSubnetId
+output acaInfrastructureSubnetId string = deployInfra ? acaNatNetwork!.outputs.infrastructureSubnetId : resourceId('Microsoft.Network/virtualNetworks/subnets', '${appName}-vnet', '${appName}-aca-subnet')
 
 @description('The principal ID of the user-assigned managed identity — grant this Cognitive Services OpenAI User on your AOAI instances and db_datareader/db_datawriter on Azure SQL')
 output managedIdentityPrincipalId string = effectiveManagedIdentityPrincipalId
@@ -597,7 +644,9 @@ output keyVaultName string = keyVaultName
 output acrLoginServer string = effectiveAcrServer
 
 @description('Virtual network name')
-output vnetName string = acaNatNetwork!.outputs.vnetName
+output vnetName string = deployInfra ? acaNatNetwork!.outputs.vnetName : '${appName}-vnet'
 
 @description('Application Insights connection string (if OTel enabled)')
-output appInsightsConnectionString string = enableOtel ? appInsights!.properties.ConnectionString : 'N/A (OTel disabled)'
+output appInsightsConnectionString string = enableOtel
+  ? (deployInfra ? appInsights!.properties.ConnectionString : existingAppInsights!.properties.ConnectionString)
+  : 'N/A (OTel disabled)'

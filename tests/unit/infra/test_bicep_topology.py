@@ -107,7 +107,7 @@ class TestBicepTopology(unittest.TestCase):
         assert len(modules) == 2
         network_module = next(module for module in modules if "aca-nat-network" in module["name"])
         front_door_module = next(module for module in modules if "aca-front-door" in module["name"])
-        assert "condition" not in network_module
+        assert network_module["condition"] == "[parameters('deployInfra')]"
         assert "parameters('enableFrontDoor')" in front_door_module["condition"]
         assert (
             "effectiveFrontDoorPrivateLink"
@@ -142,11 +142,14 @@ class TestBicepTopology(unittest.TestCase):
 
         environment = _resources(template, "Microsoft.App/managedEnvironments")[0]
         environment_properties = environment["properties"]
-        assert environment_properties["publicNetworkAccess"] == "[variables('effectiveContainerAppsPublicAccess')]"
-        effective_public_access = template["variables"]["effectiveContainerAppsPublicAccess"]
+        assert environment["condition"] == "[parameters('deployInfra')]"
+        effective_public_access = environment_properties["publicNetworkAccess"]
         assert "disableContainerAppsPublicAccess" in effective_public_access
         assert "effectiveFrontDoorPrivateLink" in effective_public_access
         assert "fail(" in effective_public_access
+        assert "parameters('deployInfra')" in effective_public_access
+        assert "reference(resourceId('Microsoft.App/managedEnvironments'" in effective_public_access
+        assert effective_public_access.endswith(".publicNetworkAccess)]")
         assert environment_properties["vnetConfiguration"]["internal"] is False
         assert (
             environment_properties["appLogsConfiguration"]["logAnalyticsConfiguration"]["dynamicJsonColumns"] is False
@@ -182,6 +185,41 @@ class TestBicepTopology(unittest.TestCase):
         )
         assert "aca-front-door" in cors_value
         assert "outputs.endpointHostName.value" in cors_value
+        assert "Microsoft.Cdn/profiles/afdEndpoints" in cors_value
+        assert ".publicNetworkAccess" in cors_value
+
+    def test_main_gates_application_and_infrastructure_independently(self) -> None:
+        template = _compile_bicep(MAIN_BICEP, self.output_directory / "app-only.json")
+
+        assert template["parameters"]["deployInfra"]["defaultValue"] is True
+        assert template["parameters"]["deployApp"]["defaultValue"] is True
+        assert template["parameters"]["containerImage"]["defaultValue"] == ""
+        apps = _resources(template, "Microsoft.App/containerApps")
+        assert len(apps) == 1
+        assert apps[0]["condition"] == "[parameters('deployApp')]"
+        assert apps[0]["properties"]["template"]["containers"][0]["image"] == "[variables('effectiveContainerImage')]"
+        image = template["variables"]["effectiveContainerImage"]
+        assert "and(parameters('deployApp'), empty(parameters('containerImage')))" in image
+        assert "fail('containerImage is required when deployApp is true')" in image
+        for resource in template["resources"]:
+            if resource["type"] == "Microsoft.App/containerApps":
+                continue
+            condition = resource["condition"]
+            if resource["type"] == "Microsoft.ContainerRegistry/registries":
+                condition = template["variables"]["createAcr"]
+                assert "fail('App-only deployment requires an existing registry')" in condition
+            elif resource["type"] == "Microsoft.ManagedIdentity/userAssignedIdentities":
+                condition = template["variables"]["createManagedIdentity"]
+                assert "fail('App-only deployment requires existingManagedIdentityResourceId')" in condition
+            assert "parameters('deployInfra')" in condition
+
+        outputs = template["outputs"]
+        assert outputs["egressPublicIpAddress"]["value"].startswith("[if(parameters('deployInfra'),")
+        assert "Microsoft.Network/publicIPAddresses" in outputs["egressPublicIpAddress"]["value"]
+        assert "Microsoft.Cdn/profiles/afdEndpoints" in outputs["frontDoorFqdn"]["value"]
+        assert "parameters('deployInfra')" in outputs["frontDoorFqdn"]["value"]
+        assert outputs["appFqdn"]["value"].startswith("[if(parameters('deployApp'),")
+        assert "reference(resourceId('Microsoft.App/containerApps'" in outputs["appFqdn"]["value"]
 
     def test_aca_nat_network_is_static_and_delegated(self):
         template = _compile_bicep(NETWORK_BICEP, self.output_directory / "network.json")
