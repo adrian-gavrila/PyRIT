@@ -359,10 +359,10 @@ deployment_tags='{}'
 existing_pip_ip_tags='[]'
 build_infra_parameters
 normalized_expected_environment_id=$(lowercase "$TEST_ENVIRONMENT_ID")
-exec 3< <(
+exec 3<<< "$(
   printf '%s\\n' "$TEST_INITIAL_CONNECTION"
   for attempt in {1..20}; do printf '%s\\n' "$TEST_REMOVAL_RESULT"; done
-)
+)"
 az() {
   printf 'az:' >&2; printf '%s\\t' "$@" >&2; printf '\\n' >&2
   case "$1 $2" in
