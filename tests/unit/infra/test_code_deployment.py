@@ -1,6 +1,6 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
-"""Exercise the shared Bash deployment flow without Azure or network calls."""
+"""Check deployment inputs, phase parameters, and bounded HTTP readiness without Azure."""
 
 import json
 import os
@@ -8,26 +8,42 @@ import shlex
 import shutil
 import subprocess
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-DEPLOY_SCRIPT = REPO_ROOT / "infra" / "pipelines" / "deploy_gui.sh"
+PIPELINES = REPO_ROOT / "infra" / "pipelines"
 SUBSCRIPTION = "11111111-1111-1111-1111-111111111111"
 RESOURCE_GROUP = f"/subscriptions/{SUBSCRIPTION}/resourceGroups/copyrit-test"
-APP = f"{RESOURCE_GROUP}/providers/Microsoft.App/containerApps/copyrit-test"
-ENVIRONMENT = f"{RESOURCE_GROUP}/providers/Microsoft.App/managedEnvironments/copyrit-test-env"
-VNET = f"{RESOURCE_GROUP}/providers/Microsoft.Network/virtualNetworks/copyrit-test-vnet"
-SUBNET = f"{VNET}/subnets/copyrit-test-aca-subnet"
-NAT = f"{RESOURCE_GROUP}/providers/Microsoft.Network/natGateways/copyrit-test-nat"
-PIP = f"{RESOURCE_GROUP}/providers/Microsoft.Network/publicIPAddresses/copyrit-test-egress-pip"
 IMAGE = f"copyritacr.azurecr.io/pyrit@sha256:{'a' * 64}"
-PREVIOUS_IMAGE = f"copyritacr.azurecr.io/pyrit@sha256:{'b' * 64}"
-ACA_HOST = "copyrit-test.example.westus2.azurecontainerapps.io"
-AFD_HOST = "copyrit-test.example.azurefd.net"
-REVISION = "copyrit-test--0000002"
-PREVIOUS_REVISION = "copyrit-test--0000001"
+COMMON_INPUTS = {
+    "PYRIT_SLOT": "test",
+    "PYRIT_BUILD_ID": "42",
+    "PYRIT_SOURCE_DIRECTORY": REPO_ROOT.as_posix(),
+    "PYRIT_AGENT_TEMP_DIRECTORY": REPO_ROOT.as_posix(),
+    "PYRIT_DEPLOYMENT_RESOURCE_GROUP": "copyrit-test",
+    "PYRIT_APP_NAME": "copyrit-test",
+    "PYRIT_MANAGED_IDENTITY_RESOURCE_ID": (
+        f"{RESOURCE_GROUP}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/copyrit-id"
+    ),
+    "PYRIT_ACR_RESOURCE_ID": f"{RESOURCE_GROUP}/providers/Microsoft.ContainerRegistry/registries/copyritacr",
+    "PYRIT_ENABLE_OTEL": "false",
+}
+INFRA_INPUTS = {
+    "PYRIT_VNET_ADDRESS_PREFIX": "10.20.0.0/16",
+    "PYRIT_INFRASTRUCTURE_SUBNET_ADDRESS_PREFIX": "10.20.0.0/23",
+}
+APP_INPUTS = {
+    "PYRIT_CONTAINER_IMAGE": IMAGE,
+    "PYRIT_ENTRA_TENANT_ID": SUBSCRIPTION,
+    "PYRIT_ENTRA_CLIENT_ID": SUBSCRIPTION,
+    "PYRIT_ALLOWED_GROUP_OBJECT_IDS": SUBSCRIPTION,
+    "PYRIT_ADMIN_GROUP_OBJECT_ID": SUBSCRIPTION,
+    "PYRIT_SQL_SERVER_FQDN": "copyrit.database.windows.net",
+    "PYRIT_SQL_DATABASE_NAME": "copyrit",
+    "PYRIT_KEY_VAULT_RESOURCE_ID": f"{RESOURCE_GROUP}/providers/Microsoft.KeyVault/vaults/copyrit-kv",
+    "PYRIT_ENV_SECRET_NAME": "pyrit-env",
+}
 
 
 def _find_bash() -> str | None:
@@ -43,421 +59,365 @@ def _find_bash() -> str | None:
 BASH = _find_bash()
 JQ = shutil.which("jq")
 
-# Only the external services and elapsed time are replaced; source, jq, and Python run normally.
-HARNESS = r"""
-set -euo pipefail
-az() {
-  printf '%s\t' "$@" >> "$MOCK_DIRECTORY/az.log"; printf '\n' >> "$MOCK_DIRECTORY/az.log"
-  if [[ -n "$MOCK_FAIL" && "$*" == "$MOCK_FAIL"* ]]; then return 23; fi
-  local query='' previous='' argument deploy_app=false deploy_infra=false
-  for argument in "$@"; do
-    [[ "$previous" != --query ]] || query=$argument
-    previous=$argument
-    case "$argument" in
-      deployApp=true) deploy_app=true ;;
-      deployInfra=true) deploy_infra=true ;;
-    esac
-  done
-  case "$1 $2 ${3:-}" in
-    'account show --query') printf '%s\n' "$MOCK_SUBSCRIPTION" ;;
-    'resource show --ids') : ;;
-    'resource list --resource-group') printf '%s\n' "$MOCK_FRONT_DOOR_COUNT" ;;
-    'group show --name') printf '%s\n' "$MOCK_RESOURCE_GROUP" ;;
-    'containerapp show --resource-group')
-      case "$query" in
-        '{id:'*) printf '%s\n' "$MOCK_APP" ;;
-        properties.latestRevisionName) printf '%s\n' "${MOCK_REVISION:-$(cat "$MOCK_DIRECTORY/revision")}" ;;
-        properties.configuration.ingress.fqdn) printf '%s\n' "$MOCK_ACA_HOST" ;;
-        '{latest:'*)
-          touch "$MOCK_DIRECTORY/final-read"
-          jq -cn --arg latest "${MOCK_FINAL_LATEST:-$(cat "$MOCK_DIRECTORY/revision")}" \
-            --arg ready "${MOCK_FINAL_READY:-$(cat "$MOCK_DIRECTORY/revision")}" \
-            --arg image "${MOCK_FINAL_IMAGE:-$(cat "$MOCK_DIRECTORY/image")}" \
-            '{latest:$latest,ready:$ready,image:$image}' ;;
-        *) echo "Unexpected app query: $query" >&2; return 97 ;;
-      esac ;;
-    'containerapp env show')
-      if [[ "$query" == '{id:'* ]]; then printf '%s\n' "$MOCK_ENVIRONMENT"
-      elif [[ "$query" == properties.publicNetworkAccess ]]; then
-        if [[ -e "$MOCK_DIRECTORY/final-read" && -n "$MOCK_FINAL_ACCESS" ]]; then
-          printf '%s\n' "$MOCK_FINAL_ACCESS"
-        else cat "$MOCK_DIRECTORY/access"; fi
-      else echo "Unexpected environment query: $query" >&2; return 97; fi ;;
-    'network vnet show') printf '%s\n' "$MOCK_VNET" ;;
-    'network vnet subnet') printf '%s\n' "$MOCK_SUBNET" ;;
-    'network nat gateway') printf '%s\n' "$MOCK_NAT" ;;
-    'network public-ip show')
-      case "$query" in
-        '{id:'*) printf '%s\n' "$MOCK_PIP" ;;
-        'ipTags || `[]`') printf '[]\n' ;;
-        id) printf '%s\n' "$MOCK_PIP_ID" ;;
-        *) echo "Unexpected PIP query: $query" >&2; return 97 ;;
-      esac ;;
-    'deployment group what-if') printf '%s\n' "$MOCK_WHAT_IF" ;;
-    'deployment group create')
-      [[ "$*" != *-rollback-origin* ]] || touch "$MOCK_DIRECTORY/rollback"
-      for argument in "$@"; do
-        case "$argument" in
-          containerImage=*)
-            if [[ "$deploy_app" == true ]]; then
-              printf '%s\n' "${argument#*=}" > "$MOCK_DIRECTORY/image"
-              printf '%s\n' "$MOCK_DEPLOYED_REVISION" > "$MOCK_DIRECTORY/revision"
-            fi ;;
-          disableContainerAppsPublicAccess=true)
-            if [[ "$deploy_infra" == true ]]; then printf 'Disabled\n' > "$MOCK_DIRECTORY/access"; fi ;;
-          disableContainerAppsPublicAccess=false)
-            if [[ "$deploy_infra" == true ]]; then printf 'Enabled\n' > "$MOCK_DIRECTORY/access"; fi ;;
-        esac
-      done ;;
-    'deployment group show')
-      case "$query" in
-        properties.outputs.frontDoorPrivateLinkRequestMessage.value) printf '%s\n' "$MOCK_PL_MESSAGE" ;;
-        properties.outputs.appFqdn.value) printf '%s\n' "$MOCK_ACA_HOST" ;;
-        properties.outputs.frontDoorFqdn.value) printf '%s\n' "$MOCK_AFD_HOST" ;;
-        properties.outputs.egressPublicIpAddress.value) printf '203.0.113.10\n' ;;
-        *) echo "Unexpected deployment output: $query" >&2; return 97 ;;
-      esac ;;
-    'containerapp revision show')
-      jq -cn --arg image "${MOCK_REVISION_IMAGE:-$(cat "$MOCK_DIRECTORY/image")}" \
-        --arg health "$MOCK_HEALTH" '{image:$image,health:$health}' ;;
-    'rest --method get') printf '%s\n' "$MOCK_ORIGIN" ;;
-    'rest --method delete') : ;;
-    'network private-endpoint-connection list')
-      if [[ -e "$MOCK_DIRECTORY/rollback" ]]; then printf '[]\n'
-      else printf '%s\n' "$MOCK_CONNECTIONS"; fi ;;
-    *) echo "Unexpected Azure call: $*" >&2; return 97 ;;
-  esac
-}
-curl() {
-  printf '%s\t' "$@" >> "$MOCK_DIRECTORY/curl.log"; printf '\n' >> "$MOCK_DIRECTORY/curl.log"
-  if [[ "${!#}" == "https://$MOCK_ACA_HOST/api/health" &&
-    "$(cat "$MOCK_DIRECTORY/access")" == Disabled ]]; then
-    printf '403'; return 0
-  fi
-  printf '%s' "$MOCK_HTTP_STATUS"
-  return "$MOCK_HTTP_EXIT"
-}
-sleep() { SECONDS=$((SECONDS + $1)); }
-"""
-
 
 @unittest.skipIf(BASH is None or JQ is None, "Native Bash and jq are required")
 class TestCodeDeployment(unittest.TestCase):
-    def setUp(self) -> None:
-        tags = {"owner": "copyrit"}
-        self.environment = {
-            "PYRIT_SLOT": "test",
-            "PYRIT_DEPLOY_INFRA": "false",
-            "PYRIT_BUILD_ID": "42",
-            "PYRIT_SOURCE_DIRECTORY": REPO_ROOT.as_posix(),
-            "PYRIT_DEPLOYMENT_RESOURCE_GROUP": "copyrit-test",
-            "PYRIT_APP_NAME": "copyrit-test",
-            "PYRIT_CONTAINER_IMAGE": IMAGE,
-            "PYRIT_VNET_ADDRESS_PREFIX": "10.20.0.0/16",
-            "PYRIT_INFRASTRUCTURE_SUBNET_ADDRESS_PREFIX": "10.20.0.0/23",
-            "PYRIT_ALLOWED_CLIENT_CIDR": "",
-            "PYRIT_MANAGED_IDENTITY_RESOURCE_ID": (
-                f"{RESOURCE_GROUP}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/copyrit-id"
-            ),
-            "PYRIT_ENTRA_TENANT_ID": SUBSCRIPTION,
-            "PYRIT_ENTRA_CLIENT_ID": SUBSCRIPTION,
-            "PYRIT_ALLOWED_GROUP_OBJECT_IDS": SUBSCRIPTION,
-            "PYRIT_ADMIN_GROUP_OBJECT_ID": SUBSCRIPTION,
-            "PYRIT_CONFIG_FILE_URI": "",
-            "PYRIT_SQL_SERVER_FQDN": "copyrit.database.windows.net",
-            "PYRIT_SQL_DATABASE_NAME": "copyrit",
-            "PYRIT_KEY_VAULT_RESOURCE_ID": f"{RESOURCE_GROUP}/providers/Microsoft.KeyVault/vaults/copyrit-kv",
-            "PYRIT_ACR_RESOURCE_ID": f"{RESOURCE_GROUP}/providers/Microsoft.ContainerRegistry/registries/copyritacr",
-            "PYRIT_ENABLE_OTEL": "false",
-            "PYRIT_ENV_SECRET_NAME": "pyrit-env",
-            "MOCK_SUBSCRIPTION": SUBSCRIPTION,
-            "MOCK_RESOURCE_GROUP": RESOURCE_GROUP,
-            "MOCK_FRONT_DOOR_COUNT": "0",
-            "MOCK_PIP_ID": PIP,
-            "MOCK_REVISION": "",
-            "MOCK_DEPLOYED_REVISION": REVISION,
-            "MOCK_REVISION_IMAGE": "",
-            "MOCK_FINAL_LATEST": "",
-            "MOCK_FINAL_READY": "",
-            "MOCK_FINAL_IMAGE": "",
-            "MOCK_FINAL_ACCESS": "",
-            "MOCK_HEALTH": "Healthy",
-            "MOCK_ACA_HOST": ACA_HOST,
-            "MOCK_AFD_HOST": AFD_HOST,
-            "MOCK_PL_MESSAGE": "Azure Front Door private access to copyrit-test",
-            "MOCK_HTTP_STATUS": "200",
-            "MOCK_HTTP_EXIT": "0",
-            "MOCK_FAIL": "",
-        }
-        self.fixtures = {
-            "MOCK_APP": {
-                "id": APP,
-                "environmentId": ENVIRONMENT,
-                "tags": tags,
-                "mode": "Single",
-                "revision": PREVIOUS_REVISION,
-                "containers": [{"name": "pyrit-gui", "image": PREVIOUS_IMAGE}],
-            },
-            "MOCK_ENVIRONMENT": {"id": ENVIRONMENT, "publicNetworkAccess": "Enabled"},
-            "MOCK_VNET": {"id": VNET, "prefix": "10.20.0.0/16", "tags": tags},
-            "MOCK_SUBNET": {"id": SUBNET, "prefix": "10.20.0.0/23", "natId": NAT},
-            "MOCK_NAT": {"id": NAT, "pipId": PIP, "tags": tags},
-            "MOCK_PIP": {"id": PIP, "ip": "203.0.113.10", "allocation": "Static", "sku": "Standard", "tags": tags},
-            "MOCK_WHAT_IF": {
-                "changes": [
-                    {"changeType": "Modify", "resourceId": APP, "delta": [{"path": "properties.configuration"}]},
-                    {"changeType": "NoChange", "resourceId": ENVIRONMENT},
-                ]
-            },
-            "MOCK_ORIGIN": {"status": "Approved", "resourceId": ENVIRONMENT},
-            "MOCK_CONNECTIONS": [
-                {
-                    "id": f"{ENVIRONMENT}/privateEndpointConnections/connection-1",
-                    "properties": {
-                        "privateLinkServiceConnectionState": {
-                            "status": "Approved",
-                            "description": self.environment["MOCK_PL_MESSAGE"],
-                        }
-                    },
-                }
-            ],
-        }
-
-    def _run(self, **overrides: str) -> subprocess.CompletedProcess[str]:
+    def _run(
+        self, *, script: str, command: str = "", inputs: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
         assert BASH is not None and JQ is not None
-        environment = (
-            os.environ
-            | self.environment
-            | {name: json.dumps(value) for name, value in self.fixtures.items()}
-            | overrides
-        )
+        environment = {key: value for key, value in os.environ.items() if not key.startswith("PYRIT_")}
+        environment.update(COMMON_INPUTS | (inputs or {}))
         environment["MSYS2_ARG_CONV_EXCL"] = "*"
         environment.pop("BASH_ENV", None)
-        with tempfile.TemporaryDirectory(prefix=".deployment-test-", dir=REPO_ROOT) as directory:
-            fixture_dir = Path(directory)
-            environment["MOCK_DIRECTORY"] = fixture_dir.as_posix()
-            environment["PYRIT_AGENT_TEMP_DIRECTORY"] = fixture_dir.as_posix()
-            (fixture_dir / "image").write_text(PREVIOUS_IMAGE, encoding="utf-8")
-            (fixture_dir / "revision").write_text(PREVIOUS_REVISION, encoding="utf-8")
-            access = json.loads(environment["MOCK_ENVIRONMENT"])["publicNetworkAccess"]
-            (fixture_dir / "access").write_text(access, encoding="utf-8")
-            for log in ("az", "curl"):
-                (fixture_dir / f"{log}.log").touch()
-            jq_flags = "-b" if os.name == "nt" else ""
-            wrappers = (
-                f'python3() {{ {shlex.quote(Path(sys.executable).as_posix())} "$@"; }}\n'
-                f'jq() {{ {shlex.quote(Path(JQ).as_posix())} {jq_flags} "$@"; }}\n'
-            )
-            result = subprocess.run(
-                [BASH, "--noprofile", "--norc", "-s"],
-                input=wrappers + HARNESS + f"\nsource {shlex.quote(DEPLOY_SCRIPT.as_posix())}\n",
-                capture_output=True,
-                text=True,
-                check=False,
-                env=environment,
-                timeout=60,
-            )
-            self.az_calls, self.curl_calls = [
-                [line.rstrip("\t").split("\t") for line in (fixture_dir / f"{log}.log").read_text().splitlines()]
-                for log in ("az", "curl")
-            ]
+        jq_flags = "-b" if os.name == "nt" else ""
+        prelude = (
+            "set -euo pipefail\n"
+            "az() { echo 'Unexpected Azure call' >&2; exit 97; }\n"
+            "curl() { echo 'Unexpected network call' >&2; exit 97; }\n"
+            "sleep() { echo 'Unexpected wait' >&2; exit 97; }\n"
+            f'python3() {{ {shlex.quote(Path(sys.executable).as_posix())} "$@"; }}\n'
+            f'jq() {{ {shlex.quote(Path(JQ).as_posix())} {jq_flags} "$@"; }}\n'
+            "before_options=$(set +o); before_traps=$(trap -p); before_directory=$PWD\n"
+            f"source {shlex.quote((PIPELINES / script).as_posix())}\n"
+            '[[ "$(set +o)" == "$before_options" && "$(trap -p)" == "$before_traps" '
+            '&& "$PWD" == "$before_directory" ]]\n'
+        )
+        result = subprocess.run(
+            [BASH, "--noprofile", "--norc", "-s"],
+            input=prelude + command + "\n",
+            capture_output=True,
+            text=True,
+            check=False,
+            env=environment,
+            timeout=30,
+        )
         assert "Unexpected " not in result.stderr, result.stderr
         return result
 
-    def _assert_app_only_writes(self) -> None:
-        deployments = [call for call in self.az_calls if call[:3] == ["deployment", "group", "create"]]
-        assert len(deployments) == 1, self.az_calls
-        assert "deployInfra=false" in deployments[0]
-        assert "deployApp=true" in deployments[0]
-        assert deployments[0][deployments[0].index("--mode") + 1] == "Incremental"
-        assert "containerImage=" + IMAGE in deployments[0]
-        assert not any("rollback" in argument for call in self.az_calls for argument in call)
-        assert not any(call[:2] == ["containerapp", "update"] for call in self.az_calls)
-        assert not any(call[:2] == ["network", "private-endpoint-connection"] for call in self.az_calls)
-        assert not any(call[0] == "rest" for call in self.az_calls)
-
-    def test_app_only_reconciles_config_and_preserves_access_mode(self) -> None:
-        for access, front_door in (("Enabled", "0"), ("Enabled", "1"), ("Disabled", "1")):
-            with self.subTest(access=access, front_door=front_door):
-                self.fixtures["MOCK_ENVIRONMENT"]["publicNetworkAccess"] = access
-                result = self._run(MOCK_FRONT_DOOR_COUNT=front_door)
-                assert result.returncode == 0, result.stdout + result.stderr
-                self._assert_app_only_writes()
-                deployment = next(call for call in self.az_calls if call[:3] == ["deployment", "group", "create"])
-                preview = next(call for call in self.az_calls if call[:3] == ["deployment", "group", "what-if"])
-                for call in (preview, deployment):
-                    assert call[call.index("--template-file") + 1].endswith("/infra/main.bicep")
-                    assert f"enableFrontDoor={'true' if front_door == '1' else 'false'}" in call
-                    assert f"disableContainerAppsPublicAccess={'true' if access == 'Disabled' else 'false'}" in call
-                    assert "sqlDatabaseName=copyrit" in call
-                assert self.az_calls.index(preview) < self.az_calls.index(deployment)
-                expected_host = AFD_HOST if access == "Disabled" else ACA_HOST
-                assert self.curl_calls[0][-1] == f"https://{expected_host}/api/health"
-                assert [call[-1] for call in self.curl_calls] == (
-                    [f"https://{AFD_HOST}/api/health", f"https://{ACA_HOST}/api/health"]
-                    if access == "Disabled"
-                    else [f"https://{ACA_HOST}/api/health"]
+    def test_source_defines_helpers_without_initializing_deployment(self) -> None:
+        for script in ("deployment_common.sh", "deploy_infra.sh", "deploy_app.sh"):
+            with self.subTest(script=script):
+                result = self._run(
+                    script=script,
+                    inputs={"PYRIT_SLOT": ""},
+                    command="[[ -z ${deployment_name+x} && -z ${parameters+x} && -z ${cutover_in_progress+x} ]]",
                 )
-                assert all("--location" not in call and "--insecure" not in call for call in self.curl_calls)
-                assert "Deployment healthy:" in result.stdout
+                assert result.returncode == 0, result.stdout + result.stderr
+                assert result.stdout == ""
 
-    def test_infrastructure_then_app_deploys_the_app_once(self) -> None:
-        infrastructure_preview = json.dumps(
-            {
-                "changes": [
-                    {"changeType": "Ignore", "resourceId": APP},
-                    {"changeType": "NoChange", "resourceId": APP + "/authConfigs/current"},
-                    {
-                        "changeType": "Modify",
-                        "resourceId": ENVIRONMENT,
-                        "delta": [{"path": "properties.publicNetworkAccess"}],
+    def test_infra_parameters_exclude_app_settings_and_preserve_rollback_scope(self) -> None:
+        result = self._run(
+            script="deploy_infra.sh",
+            inputs=INFRA_INPUTS,
+            command="""
+validate_infra_inputs
+deployment_tags='{"owner":"copyrit"}'
+existing_pip_ip_tags='[]'
+build_infra_parameters
+printf '%s\\n' "$template_file" "$deployment_name" "${parameters[@]}" --rollback "${rollback_parameters[@]}"
+""",
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        template, name, *values = result.stdout.splitlines()
+        assert template.endswith("/infra/infrastructure.bicep")
+        assert name == "pyrit-test-42-infra"
+        separator = values.index("--rollback")
+        parameters = dict(value.split("=", 1) for value in values[:separator])
+        rollback = dict(value.split("=", 1) for value in values[separator + 1 :])
+        assert set(parameters) == {
+            "appName",
+            "acrResourceId",
+            "existingManagedIdentityResourceId",
+            "enableOtel",
+            "enableFrontDoor",
+            "enableFrontDoorPrivateLink",
+            "frontDoorPrivateLinkRequestMessage",
+            "disableContainerAppsPublicAccess",
+            "vnetAddressPrefix",
+            "infrastructureSubnetAddressPrefix",
+            "egressPublicIpTags",
+            "protectEgressPublicIp",
+            "tags",
+        }
+        assert parameters["vnetAddressPrefix"] == INFRA_INPUTS["PYRIT_VNET_ADDRESS_PREFIX"]
+        assert parameters["protectEgressPublicIp"] == "true"
+        assert parameters["enableFrontDoorPrivateLink"] == "true"
+        assert parameters["disableContainerAppsPublicAccess"] == "true"
+        assert rollback == parameters | {
+            "enableFrontDoorPrivateLink": "false",
+            "disableContainerAppsPublicAccess": "false",
+        }
+
+    def test_app_parameters_exclude_network_inputs_and_cutover_flags(self) -> None:
+        for front_door in ("true", "false"):
+            with self.subTest(front_door=front_door):
+                result = self._run(
+                    script="deploy_app.sh",
+                    inputs=APP_INPUTS,
+                    command=f"""
+validate_app_inputs
+deployment_tags='{{"owner":"copyrit"}}'
+enable_front_door={front_door}
+build_app_parameters
+printf '%s\\n' "$template_file" "$deployment_name" "${{parameters[@]}}"
+""",
+                )
+                assert result.returncode == 0, result.stdout + result.stderr
+                template, name, *values = result.stdout.splitlines()
+                assert template.endswith("/infra/application.bicep")
+                assert name == "pyrit-test-42-app"
+                parameters = dict(value.split("=", 1) for value in values)
+                assert set(parameters) == {
+                    "appName",
+                    "containerImage",
+                    "entraTenantId",
+                    "entraClientId",
+                    "allowedGroupObjectIds",
+                    "adminGroupObjectId",
+                    "allowedCidr",
+                    "sqlServerFqdn",
+                    "sqlDatabaseName",
+                    "keyVaultResourceId",
+                    "acrResourceId",
+                    "existingManagedIdentityResourceId",
+                    "enableOtel",
+                    "envSecretName",
+                    "pyritConfigFileUri",
+                    "enableFrontDoor",
+                    "tags",
+                }
+                assert parameters["containerImage"] == IMAGE
+                assert parameters["sqlDatabaseName"] == "copyrit"
+                assert parameters["enableFrontDoor"] == front_door
+                assert parameters["allowedCidr"] == parameters["pyritConfigFileUri"] == ""
+
+    def test_common_inputs_reject_missing_unresolved_and_noncanonical_values(self) -> None:
+        cases = [
+            ("PYRIT_SLOT", "$(slot)", "Required deployment value"),
+            ("PYRIT_BUILD_ID", "", "Required deployment value"),
+            ("PYRIT_SLOT", "staging", "Invalid slot"),
+            ("PYRIT_BUILD_ID", "42;echo unsafe", "Invalid slot or build ID"),
+            ("PYRIT_APP_NAME", "Copyrit", "Invalid deployment resource group or app name"),
+            ("PYRIT_DEPLOYMENT_RESOURCE_GROUP", "copyrit.", "Invalid deployment resource group or app name"),
+            ("PYRIT_ENABLE_OTEL", "yes", "Invalid enableOtel"),
+            ("PYRIT_ACR_RESOURCE_ID", COMMON_INPUTS["PYRIT_ACR_RESOURCE_ID"] + "/", "not canonical"),
+            (
+                "PYRIT_ACR_RESOURCE_ID",
+                COMMON_INPUTS["PYRIT_ACR_RESOURCE_ID"].replace(SUBSCRIPTION, "bad"),
+                "not canonical",
+            ),
+            ("PYRIT_MANAGED_IDENTITY_RESOURCE_ID", "copyrit-id", "not canonical"),
+            (
+                "PYRIT_MANAGED_IDENTITY_RESOURCE_ID",
+                COMMON_INPUTS["PYRIT_MANAGED_IDENTITY_RESOURCE_ID"].replace(
+                    SUBSCRIPTION, "22222222-2222-2222-2222-222222222222"
+                ),
+                "another subscription",
+            ),
+        ]
+        for key, value, message in cases:
+            with self.subTest(key=key, value=value):
+                result = self._run(script="deployment_common.sh", inputs={key: value}, command="validate_common_inputs")
+                assert result.returncode != 0
+                assert message in result.stdout, result.stdout + result.stderr
+
+    def test_active_subscription_must_match_configured_acr(self) -> None:
+        result = self._run(
+            script="deployment_common.sh",
+            command="""
+validate_common_inputs
+az() { printf '%s\\n' 22222222-2222-2222-2222-222222222222; }
+initialize_deployment_scope
+""",
+        )
+        assert result.returncode != 0
+        assert "Azure subscription does not match ACR" in result.stdout
+
+    def test_infra_rejects_invalid_network_prefixes(self) -> None:
+        for subnet in ("$(subnet)", "10.30.0.0/23", "10.20.0.1/23", "10.20.0.0/28", "2001:db8::/64"):
+            with self.subTest(subnet=subnet):
+                result = self._run(
+                    script="deploy_infra.sh",
+                    inputs=INFRA_INPUTS | {"PYRIT_INFRASTRUCTURE_SUBNET_ADDRESS_PREFIX": subnet},
+                    command="validate_infra_inputs",
+                )
+                assert result.returncode != 0
+                assert "deployment value" in result.stdout or "Invalid network prefix" in result.stdout
+
+    def test_app_rejects_invalid_auth_configuration_and_optional_values(self) -> None:
+        cases = [
+            ("PYRIT_ENTRA_TENANT_ID", "not-a-guid", "Invalid Entra"),
+            ("PYRIT_ALLOWED_GROUP_OBJECT_IDS", " , ", "Invalid Entra"),
+            ("PYRIT_SQL_SERVER_FQDN", "copyrit.example.com", "Invalid SQL"),
+            ("PYRIT_ENV_SECRET_NAME", "invalid/secret", "Invalid SQL"),
+            ("PYRIT_ALLOWED_CLIENT_CIDR", "$(allowed)", "Optional deployment value"),
+            ("PYRIT_CONFIG_FILE_URI", "$(config)", "Optional deployment value"),
+            ("PYRIT_ALLOWED_CLIENT_CIDR", "192.0.2.0/24", "leave PYRIT_ALLOWED_CLIENT_CIDR empty"),
+            ("PYRIT_CONFIG_FILE_URI", "https://example.com/container/config", "Invalid Entra"),
+            ("PYRIT_CONFIG_FILE_URI", "https://account.blob.core.windows.net/container/config?sas=1", "Invalid Entra"),
+            (
+                "PYRIT_KEY_VAULT_RESOURCE_ID",
+                APP_INPUTS["PYRIT_KEY_VAULT_RESOURCE_ID"].replace(SUBSCRIPTION, "22222222-2222-2222-2222-222222222222"),
+                "another subscription",
+            ),
+        ]
+        for key, value, message in cases:
+            with self.subTest(key=key, value=value):
+                result = self._run(
+                    script="deploy_app.sh", inputs=APP_INPUTS | {key: value}, command="validate_app_inputs"
+                )
+                assert result.returncode != 0
+                assert message in result.stdout, result.stdout + result.stderr
+
+    def test_shared_image_validation_requires_registry_digest_and_valid_repository(self) -> None:
+        for image, message in (
+            ("copyritacr.azurecr.io/pyrit:latest", "immutable registry digest"),
+            (IMAGE[:-1], "immutable registry digest"),
+            (IMAGE.replace("copyritacr", "otheracr"), "registry does not match"),
+            (IMAGE.replace("/pyrit@", "/../pyrit@"), "repository is invalid"),
+            (IMAGE.replace("/pyrit@", "/Pyrit@"), "repository is invalid"),
+        ):
+            with self.subTest(image=image):
+                result = self._run(
+                    script="deployment_common.sh",
+                    inputs={"PYRIT_CONTAINER_IMAGE": image},
+                    command='validate_common_inputs; validate_immutable_image "$PYRIT_CONTAINER_IMAGE"',
+                )
+                assert result.returncode != 0
+                assert message in result.stdout, result.stdout + result.stderr
+
+    def test_http_readiness_accepts_only_successful_200(self) -> None:
+        for response, code in (("200", 0), ("302", 0), ("504", 0), ("200", 28)):
+            with self.subTest(response=response, code=code):
+                result = self._run(
+                    script="deployment_common.sh",
+                    command=f"""
+curl() {{ printf '%s' {response}; return {code}; }}
+sleep() {{ SECONDS=$((SECONDS + $1)); }}
+wait_for_http_health https://copyrit.example.azurefd.net/api/health 60
+""",
+                )
+                assert (result.returncode == 0) == (response == "200" and code == 0), result.stdout + result.stderr
+                assert result.stdout.count("Application health at ") <= 2
+                if result.returncode:
+                    assert "Application endpoint did not return a healthy response" in result.stdout
+
+    def test_http_readiness_caps_requests_and_sleep_to_remaining_budget(self) -> None:
+        result = self._run(
+            script="deployment_common.sh",
+            command="""
+curl() { printf 'request:%s\\n' "$*" >&2; printf '504'; }
+sleep() { printf 'sleep:%s\\n' "$1" >&2; SECONDS=$((SECONDS + $1)); }
+wait_for_http_health https://copyrit.example.azurefd.net/api/health 31
+""",
+        )
+        assert result.returncode != 0
+        requests = [
+            shlex.split(line.removeprefix("request:"))
+            for line in result.stderr.splitlines()
+            if line.startswith("request:")
+        ]
+        sleeps = [int(line.removeprefix("sleep:")) for line in result.stderr.splitlines() if line.startswith("sleep:")]
+        assert 1 <= len(requests) <= 2
+        assert 30 <= sum(sleeps) <= 31
+        for request in requests:
+            assert "--location" not in request and "--insecure" not in request
+            assert 0 < int(request[request.index("--max-time") + 1]) <= 30
+        if len(requests) == 2:
+            assert requests[1][requests[1].index("--max-time") + 1] == "1"
+
+    def _run_cancellation_rollback(
+        self, *, removed: bool, signal: str
+    ) -> tuple[subprocess.CompletedProcess[str], list[list[str]]]:
+        environment_id = f"{RESOURCE_GROUP}/providers/Microsoft.App/managedEnvironments/copyrit-test-env"
+        connection = json.dumps(
+            [
+                {
+                    "id": f"{environment_id}/privateEndpointConnections/connection-1",
+                    "properties": {
+                        "privateLinkServiceConnectionState": {
+                            "description": "Azure Front Door private access to copyrit-test",
+                            "status": "Pending",
+                        }
                     },
-                ]
-            }
+                }
+            ]
         )
         result = self._run(
-            PYRIT_DEPLOY_INFRA="true", PYRIT_CONTAINER_IMAGE="ignored:mutable", MOCK_WHAT_IF=infrastructure_preview
+            script="deploy_infra.sh",
+            inputs=INFRA_INPUTS
+            | {
+                "TEST_ENVIRONMENT_ID": environment_id,
+                "TEST_INITIAL_CONNECTION": connection,
+                "TEST_REMOVAL_RESULT": "[]" if removed else connection,
+                "TEST_SIGNAL": signal,
+            },
+            command="""
+validate_infra_inputs
+deployment_tags='{}'
+existing_pip_ip_tags='[]'
+build_infra_parameters
+normalized_expected_environment_id=$(lowercase "$TEST_ENVIRONMENT_ID")
+exec 3< <(
+  printf '%s\\n' "$TEST_INITIAL_CONNECTION"
+  for attempt in {1..20}; do printf '%s\\n' "$TEST_REMOVAL_RESULT"; done
+)
+az() {
+  printf 'az:' >&2; printf '%s\\t' "$@" >&2; printf '\\n' >&2
+  case "$1 $2" in
+    'containerapp show') printf '%s\\n' copyrit-test.example.azurecontainerapps.io ;;
+    'network private-endpoint-connection') local response; IFS= read -r response <&3; printf '%s\\n' "$response" ;;
+    'deployment group'|'rest --method') : ;;
+    *) echo 'Unexpected Azure call' >&2; exit 97 ;;
+  esac
+}
+sleep() { :; }
+trap rollback_public_origin EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
+cutover_in_progress=true
+kill -"$TEST_SIGNAL" $$
+""",
         )
-        assert result.returncode == 0, result.stdout + result.stderr
-        deployments = [call for call in self.az_calls if call[:3] == ["deployment", "group", "create"]]
-        assert len(deployments) == 1
-        for call in [deployments[0], next(c for c in self.az_calls if c[:3] == ["deployment", "group", "what-if"])]:
-            assert call[call.index("--template-file") + 1].endswith("/infra/main.bicep")
-            assert "deployInfra=true" in call
-            assert "deployApp=false" in call
-            assert not any(argument.startswith("containerImage=") for argument in call)
-            assert call[call.index("--mode") + 1] == "Incremental"
-            assert "enableFrontDoorPrivateLink=true" in call
-            assert "disableContainerAppsPublicAccess=true" in call
-        assert any(call[:2] == ["network", "private-endpoint-connection"] for call in self.az_calls)
-        assert any(call[:3] == ["rest", "--method", "get"] for call in self.az_calls)
-        assert self.curl_calls[0][-1] == f"https://{AFD_HOST}/api/health"
-        assert f"app revision unchanged: {PREVIOUS_REVISION}" in result.stdout
+        calls = [
+            line.removeprefix("az:").rstrip("\t").split("\t")
+            for line in result.stderr.splitlines()
+            if line.startswith("az:")
+        ]
+        return result, calls
 
-        self.fixtures["MOCK_ENVIRONMENT"]["publicNetworkAccess"] = "Disabled"
-        result = self._run(MOCK_FRONT_DOOR_COUNT="1")
-        assert result.returncode == 0, result.stdout + result.stderr
-        self._assert_app_only_writes()
-        deployments += [call for call in self.az_calls if call[:3] == ["deployment", "group", "create"]]
-        assert [call for call in deployments if "deployApp=true" in call] == [deployments[1]]
-        assert f"Deployment healthy: {REVISION}" in result.stdout
+    def test_cancellation_keeps_public_access_disabled_until_connection_removal(self) -> None:
+        for signal, exit_code in (("TERM", 143), ("INT", 130)):
+            with self.subTest(signal=signal):
+                result, calls = self._run_cancellation_rollback(removed=False, signal=signal)
+                assert result.returncode == exit_code, result.stdout + result.stderr
+                assert "private endpoint connection deletion was not confirmed" in result.stdout
+                assert any(call[:3] == ["rest", "--method", "delete"] for call in calls)
+                deployments = [call for call in calls if call[:3] == ["deployment", "group", "create"]]
+                assert len(deployments) == 1
+                assert deployments[0][deployments[0].index("--name") + 1].endswith("-rollback-origin")
+                assert not any("disableContainerAppsPublicAccess=false" in call for call in calls)
 
-    def test_infrastructure_preview_rejects_app_and_child_writes(self) -> None:
-        for resource_id in (APP, APP.upper() + "/", APP + "/authConfigs/current"):
-            with self.subTest(resource_id=resource_id):
-                preview = {"changes": [{"changeType": "Modify", "resourceId": resource_id}]}
-                result = self._run(PYRIT_DEPLOY_INFRA="true", MOCK_WHAT_IF=json.dumps(preview))
-                assert result.returncode != 0
-                assert "Infrastructure-only preview must not write the Container App" in result.stdout
-                assert not any(call[:3] == ["deployment", "group", "create"] for call in self.az_calls)
-
-    def test_infrastructure_failures_roll_back_without_deploying_app(self) -> None:
-        for overrides, message in (
-            ({"MOCK_REVISION": REVISION}, "changed the running app revision"),
-            ({"MOCK_HTTP_STATUS": "504"}, "Application endpoint did not return a healthy response"),
-        ):
-            with self.subTest(overrides=overrides):
-                result = self._run(
-                    PYRIT_DEPLOY_INFRA="true",
-                    MOCK_WHAT_IF=json.dumps({"changes": [{"changeType": "NoChange", "resourceId": APP}]}),
-                    **overrides,
-                )
-                assert result.returncode != 0
-                assert message in result.stdout, result.stdout + result.stderr
+    def test_cancellation_rolls_back_only_infrastructure_after_connection_removal(self) -> None:
+        for signal, exit_code in (("TERM", 143), ("INT", 130)):
+            with self.subTest(signal=signal):
+                result, calls = self._run_cancellation_rollback(removed=True, signal=signal)
+                assert result.returncode == exit_code, result.stdout + result.stderr
                 assert "Public ACA origin rollback completed" in result.stdout
-                deployments = [call for call in self.az_calls if call[:3] == ["deployment", "group", "create"]]
-                assert len(deployments) == 3
-                for call in deployments:
-                    assert not any(argument.startswith("containerImage=") for argument in call)
-                    if call[call.index("--template-file") + 1].endswith("/infra/main.bicep"):
-                        assert "deployApp=false" in call
-                        assert "deployInfra=true" in call
-                        assert call[call.index("--mode") + 1] == "Incremental"
-
-    def test_invalid_inputs_or_topology_fail_before_deployment(self) -> None:
-        cases = [
-            ({"PYRIT_SLOT": "$(slot)"}, "Required deployment value"),
-            ({"PYRIT_CONTAINER_IMAGE": "copyritacr.azurecr.io/pyrit:latest"}, "immutable registry digest"),
-            ({"PYRIT_CONTAINER_IMAGE": IMAGE.replace("copyritacr", "otheracr")}, "registry does not match"),
-            ({"PYRIT_INFRASTRUCTURE_SUBNET_ADDRESS_PREFIX": "10.30.0.0/23"}, "Invalid network prefix"),
-            ({"MOCK_SUBSCRIPTION": "22222222-2222-2222-2222-222222222222"}, "subscription does not match"),
-            ({"MOCK_SUBNET": json.dumps(self.fixtures["MOCK_SUBNET"] | {"natId": NAT + "-other"})}, "topology"),
-            ({"MOCK_APP": json.dumps(self.fixtures["MOCK_APP"] | {"mode": "Multiple"})}, "single-revision"),
-            ({"MOCK_APP": json.dumps(self.fixtures["MOCK_APP"] | {"containers": []})}, "single-revision"),
-        ]
-        for overrides, message in cases:
-            with self.subTest(overrides=overrides):
-                result = self._run(**overrides)
-                assert result.returncode != 0
-                assert message in result.stdout, result.stdout + result.stderr
-                assert not any(call[:2] == ["deployment", "group"] for call in self.az_calls)
-                assert not self.curl_calls
-
-    def test_app_only_what_if_rejects_infrastructure_and_protected_changes(self) -> None:
-        cases = [
-            (ENVIRONMENT, "Modify", "properties.publicNetworkAccess", "App-only preview"),
-            (
-                f"{RESOURCE_GROUP}/providers/Microsoft.Cdn/profiles/copyrit-test-afd",
-                "Create",
-                "sku",
-                "App-only preview",
-            ),
-            (SUBNET, "Modify", "properties.addressPrefix", "protected-network change"),
-        ]
-        for resource_id, change_type, path, message in cases:
-            with self.subTest(resource_id=resource_id):
-                payload = {
-                    "changes": [{"resourceId": resource_id, "changeType": change_type, "delta": [{"path": path}]}]
-                }
-                result = self._run(MOCK_WHAT_IF=json.dumps(payload))
-                assert result.returncode != 0
-                assert message in result.stdout, result.stdout + result.stderr
-                assert not any(call[:3] == ["deployment", "group", "create"] for call in self.az_calls)
-                assert not self.curl_calls
-
-    def test_revision_and_current_ready_image_must_match(self) -> None:
-        cases = [
-            ({"MOCK_REVISION_IMAGE": PREVIOUS_IMAGE}, "requested image", False),
-            ({"MOCK_HEALTH": "Unhealthy"}, "did not become healthy", False),
-            ({"MOCK_FINAL_READY": "copyrit-test--old"}, "current ready revision", True),
-            ({"MOCK_FINAL_LATEST": "copyrit-test--other"}, "current ready revision", True),
-            ({"MOCK_FINAL_IMAGE": PREVIOUS_IMAGE}, "current ready revision", True),
-            ({"MOCK_FINAL_ACCESS": "Disabled"}, "access mode changed", True),
-        ]
-        for overrides, message, probes_expected in cases:
-            with self.subTest(overrides=overrides):
-                result = self._run(**overrides)
-                assert result.returncode != 0
-                assert message in result.stdout, result.stdout + result.stderr
-                assert bool(self.curl_calls) is probes_expected
-                self._assert_app_only_writes()
-
-    def test_private_http_failure_never_falls_back_or_rolls_back(self) -> None:
-        self.fixtures["MOCK_ENVIRONMENT"]["publicNetworkAccess"] = "Disabled"
-        for status, exit_code in (("302", "0"), ("504", "0"), ("200", "28")):
-            with self.subTest(status=status, exit_code=exit_code):
-                result = self._run(MOCK_FRONT_DOOR_COUNT="1", MOCK_HTTP_STATUS=status, MOCK_HTTP_EXIT=exit_code)
-                assert result.returncode != 0
-                assert "Application endpoint did not return a healthy response" in result.stdout
-                assert "Deployment healthy:" not in result.stdout
-                assert 1 <= len(self.curl_calls) <= 10
-                assert all(call[-1] == f"https://{AFD_HOST}/api/health" for call in self.curl_calls)
-                self._assert_app_only_writes()
-
-    def test_cli_failures_do_not_report_success_or_roll_back(self) -> None:
-        for command in (
-            "resource show",
-            "deployment group what-if",
-            "deployment group create",
-            "containerapp revision show",
-        ):
-            with self.subTest(command=command):
-                result = self._run(MOCK_FAIL=command)
-                assert result.returncode != 0
-                assert "Deployment healthy:" not in result.stdout
-                assert not self.curl_calls
-                assert not any("rollback" in argument for call in self.az_calls for argument in call)
-                assert not any(call[:2] == ["network", "private-endpoint-connection"] for call in self.az_calls)
+                assert any(call[:3] == ["rest", "--method", "delete"] for call in calls)
+                deployments = [call for call in calls if call[:3] == ["deployment", "group", "create"]]
+                assert len(deployments) == 2
+                rollback = deployments[-1]
+                assert rollback[rollback.index("--template-file") + 1].endswith("/infra/infrastructure.bicep")
+                assert "disableContainerAppsPublicAccess=false" in rollback
+                assert "enableFrontDoorPrivateLink=false" in rollback
+                for deployment in deployments:
+                    assert deployment[deployment.index("--mode") + 1] == "Incremental"
+                    assert not any(
+                        argument.startswith(("containerImage=", "deployApp=", "deployInfra="))
+                        for argument in deployment
+                    )
 
 
 if __name__ == "__main__":

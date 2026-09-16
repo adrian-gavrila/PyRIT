@@ -1,6 +1,6 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
-"""Compile the deployment Bicep and verify its public-NAT contract."""
+"""Compile the deployment phases and verify their public-NAT contract."""
 
 from __future__ import annotations
 
@@ -15,6 +15,8 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 MAIN_BICEP = REPO_ROOT / "infra" / "main.bicep"
+INFRASTRUCTURE_BICEP = REPO_ROOT / "infra" / "infrastructure.bicep"
+APPLICATION_BICEP = REPO_ROOT / "infra" / "application.bicep"
 NETWORK_BICEP = REPO_ROOT / "infra" / "modules" / "aca_nat_network.bicep"
 FRONT_DOOR_BICEP = REPO_ROOT / "infra" / "modules" / "aca_front_door.bicep"
 PRIVATE_ENDPOINT_APPROVAL_BICEP = REPO_ROOT / "infra" / "modules" / "aca_private_endpoint_approval.bicep"
@@ -78,37 +80,114 @@ class TestBicepTopology(unittest.TestCase):
         self.addCleanup(self._temporary_directory.cleanup)
         self.output_directory = Path(self._temporary_directory.name)
 
-    def test_main_has_one_public_nat_topology(self):
+    def test_main_has_one_public_nat_topology(self) -> None:
         template = _compile_bicep(MAIN_BICEP, self.output_directory / "main.json")
 
-        unsupported_parameters = {
-            "networkMode",
-            "enablePrivateEndpoint",
-            "infrastructureSubnetId",
-            "infrastructureNsgName",
-            "applicationGatewayNsgName",
+        expected_defaults = {
+            "appName": "pyrit-gui",
+            "location": "[resourceGroup().location]",
+            "containerImage": "",
+            "deployInfra": True,
+            "deployApp": True,
+            "allowedCidr": "",
+            "allowedCidrDescription": "Allowed IP range",
+            "pyritInitializer": "target,technique",
+            "pyritConfigFileUri": "",
+            "envSecretName": "env-global",
+            "envFileContents": "",
+            "cpuCores": "1.0",
+            "memoryGb": "2.0",
+            "minReplicas": 1,
+            "maxReplicas": 1,
+            "acrName": "",
+            "vnetAddressPrefix": "10.0.0.0/16",
+            "infrastructureSubnetAddressPrefix": "10.0.1.0/26",
+            "egressPublicIpTags": [],
+            "protectEgressPublicIp": False,
+            "logRetentionDays": 90,
+            "logAnalyticsWorkspaceId": "",
+            "logAnalyticsCustomerId": "",
+            "logAnalyticsSharedKey": "",
+            "acrResourceId": "",
+            "existingManagedIdentityResourceId": "",
+            "tags": {
+                "Service": "pyrit-gui",
+                "Owner": "<your-team>",
+                "DataClass": "<your-data-classification>",
+            },
+            "enableOtel": False,
+            "enableFrontDoor": False,
+            "enableFrontDoorPrivateLink": False,
+            "frontDoorPrivateLinkRequestMessage": (
+                "[format('Azure Front Door private access to {0}', parameters('appName'))]"
+            ),
+            "disableContainerAppsPublicAccess": False,
         }
-        assert unsupported_parameters.isdisjoint(template["parameters"])
-        assert template["parameters"]["enableFrontDoorPrivateLink"]["defaultValue"] is False
-        assert "appName" in template["parameters"]["frontDoorPrivateLinkRequestMessage"]["defaultValue"]
-        assert template["parameters"]["disableContainerAppsPublicAccess"]["defaultValue"] is False
-        assert "adminGroupObjectId" in template["parameters"]
-        assert template["parameters"]["pyritConfigFileUri"]["defaultValue"] == ""
-        assert template["parameters"]["pyritInitializer"]["defaultValue"] == "target,technique"
-        assert "fail(" in template["variables"]["validatedAllowedGroupObjectIds"]
-        assert "fail(" in template["variables"]["validatedAdminGroupObjectId"]
+        required_parameters = {
+            "entraTenantId",
+            "entraClientId",
+            "allowedGroupObjectIds",
+            "adminGroupObjectId",
+            "sqlServerFqdn",
+            "sqlDatabaseName",
+            "keyVaultResourceId",
+        }
+        assert set(template["parameters"]) == set(expected_defaults) | required_parameters
+        for name, expected in expected_defaults.items():
+            assert template["parameters"][name]["defaultValue"] == expected, name
+        for name in required_parameters:
+            assert "defaultValue" not in template["parameters"][name], name
 
-        existing_identity = template["parameters"]["existingManagedIdentityResourceId"]
-        assert existing_identity["defaultValue"] == ""
-        created_identity = _resources(template, "Microsoft.ManagedIdentity/userAssignedIdentities")[0]
+        phases = _resources(template, "Microsoft.Resources/deployments")
+        assert len(phases) == len(template["resources"]) == 2
+        infrastructure = next(phase for phase in phases if "-infrastructure" in phase["name"])
+        application = next(phase for phase in phases if "-application" in phase["name"])
+        infrastructure_template = infrastructure["properties"]["template"]
+        application_template = application["properties"]["template"]
+        resource_contracts = {
+            "Microsoft.ContainerRegistry/registries": ("2023-08-01-preview", "[variables('generatedAcrName')]"),
+            "Microsoft.OperationalInsights/workspaces": (
+                "2023-09-01",
+                "[format('{0}-logs', parameters('appName'))]",
+            ),
+            "Microsoft.Insights/components": ("2020-02-02", "[format('{0}-ai', parameters('appName'))]"),
+            "Microsoft.ManagedIdentity/userAssignedIdentities": (
+                "2023-01-31",
+                "[format('{0}-identity', parameters('appName'))]",
+            ),
+            "Microsoft.App/managedEnvironments": ("2024-10-02-preview", "[format('{0}-env', parameters('appName'))]"),
+        }
+        for resource_type, (api_version, name) in resource_contracts.items():
+            resources = _resources(infrastructure_template, resource_type)
+            assert len(resources) == 1
+            assert resources[0]["apiVersion"] == api_version
+            assert resources[0]["name"] == name
+            assert resources[0]["location"] == "[parameters('location')]"
+            assert resources[0]["tags"] == "[parameters('tags')]"
+            assert "scope" not in resources[0]
+        created_identity = _resources(infrastructure_template, "Microsoft.ManagedIdentity/userAssignedIdentities")[0]
         assert created_identity["condition"] == "[variables('createManagedIdentity')]"
+        assert infrastructure_template["variables"]["createManagedIdentity"] == (
+            "[empty(parameters('existingManagedIdentityResourceId'))]"
+        )
+        created_acr = _resources(infrastructure_template, "Microsoft.ContainerRegistry/registries")[0]
+        assert created_acr["condition"] == "[variables('createAcr')]"
+        assert "parameters('acrName')" in infrastructure_template["variables"]["createAcr"]
+        assert "parameters('acrResourceId')" in infrastructure_template["variables"]["createAcr"]
+        assert created_acr["sku"]["name"] == "Standard"
+        assert created_acr["properties"]["adminUserEnabled"] is False
+        log_analytics = _resources(infrastructure_template, "Microsoft.OperationalInsights/workspaces")[0]
+        assert log_analytics["condition"] == "[variables('createLogAnalytics')]"
+        assert log_analytics["properties"]["retentionInDays"] == "[parameters('logRetentionDays')]"
+        app_insights = _resources(infrastructure_template, "Microsoft.Insights/components")[0]
+        assert app_insights["condition"] == "[parameters('enableOtel')]"
 
-        modules = _resources(template, "Microsoft.Resources/deployments")
+        modules = _resources(infrastructure_template, "Microsoft.Resources/deployments")
         assert len(modules) == 2
         network_module = next(module for module in modules if "aca-nat-network" in module["name"])
         front_door_module = next(module for module in modules if "aca-front-door" in module["name"])
-        assert network_module["condition"] == "[parameters('deployInfra')]"
-        assert "parameters('enableFrontDoor')" in front_door_module["condition"]
+        assert "condition" not in network_module
+        assert front_door_module["condition"] == "[parameters('enableFrontDoor')]"
         assert (
             "effectiveFrontDoorPrivateLink"
             in front_door_module["properties"]["parameters"]["enablePrivateLink"]["value"]
@@ -122,34 +201,15 @@ class TestBicepTopology(unittest.TestCase):
             in front_door_module["properties"]["parameters"]["privateLinkRequestMessage"]["value"]
         )
 
-        nested_types = {
-            resource_type
-            for module in modules
-            for resource_type in (resource["type"] for resource in module["properties"]["template"]["resources"])
-        }
-        assert "Microsoft.Network/natGateways" in nested_types
-        assert "Microsoft.Network/virtualNetworks" in nested_types
-        assert "Microsoft.Network/publicIPAddresses" in nested_types
-        assert "Microsoft.Authorization/locks" in nested_types
-        assert not any("privateDnsZones" in resource_type for resource_type in nested_types)
-        assert "Microsoft.Network/applicationGateways" not in nested_types
-        assert "Microsoft.Network/networkSecurityGroups" not in nested_types
-        assert "Microsoft.Cdn/profiles" in nested_types
-        assert "Microsoft.Cdn/profiles/afdEndpoints" in nested_types
-        assert "Microsoft.Cdn/profiles/originGroups" in nested_types
-        assert "Microsoft.Cdn/profiles/originGroups/origins" in nested_types
-        assert "Microsoft.Cdn/profiles/afdEndpoints/routes" in nested_types
-
-        environment = _resources(template, "Microsoft.App/managedEnvironments")[0]
+        environment = _resources(infrastructure_template, "Microsoft.App/managedEnvironments")[0]
         environment_properties = environment["properties"]
-        assert environment["condition"] == "[parameters('deployInfra')]"
-        effective_public_access = environment_properties["publicNetworkAccess"]
+        assert "condition" not in environment
+        assert environment_properties["publicNetworkAccess"] == "[variables('effectiveContainerAppsPublicAccess')]"
+        effective_public_access = infrastructure_template["variables"]["effectiveContainerAppsPublicAccess"]
         assert "disableContainerAppsPublicAccess" in effective_public_access
         assert "effectiveFrontDoorPrivateLink" in effective_public_access
         assert "fail(" in effective_public_access
-        assert "parameters('deployInfra')" in effective_public_access
-        assert "reference(resourceId('Microsoft.App/managedEnvironments'" in effective_public_access
-        assert effective_public_access.endswith(".publicNetworkAccess)]")
+        assert "existingAcaEnvironment" not in effective_public_access
         assert environment_properties["vnetConfiguration"]["internal"] is False
         assert (
             environment_properties["appLogsConfiguration"]["logAnalyticsConfiguration"]["dynamicJsonColumns"] is False
@@ -161,65 +221,253 @@ class TestBicepTopology(unittest.TestCase):
             in environment_properties["vnetConfiguration"]["infrastructureSubnetId"]
         )
 
-        container_app = _resources(template, "Microsoft.App/containerApps")[0]
+        container_app = _resources(application_template, "Microsoft.App/containerApps")[0]
+        assert "condition" not in container_app
+        assert container_app["apiVersion"] == "2024-03-01"
+        assert container_app["name"] == "[parameters('appName')]"
+        assert container_app["location"] == "[parameters('location')]"
+        assert container_app["tags"] == "[parameters('tags')]"
+        assert "scope" not in container_app
+        assert container_app["properties"]["managedEnvironmentId"] == (
+            "[resourceId('Microsoft.App/managedEnvironments', format('{0}-env', parameters('appName')))]"
+        )
+        assert container_app["properties"]["configuration"]["activeRevisionsMode"] == "Single"
+        ingress = container_app["properties"]["configuration"]["ingress"]
+        assert ingress["external"] is True
+        assert ingress["targetPort"] == 8000
+        assert ingress["transport"] == "http"
+        assert ingress["allowInsecure"] is False
+        assert container_app["properties"]["template"]["containers"][0]["resources"] == {
+            "cpu": "[json(parameters('cpuCores'))]",
+            "memory": "[format('{0}Gi', parameters('memoryGb'))]",
+        }
+        assert container_app["properties"]["template"]["scale"] == {
+            "minReplicas": "[parameters('minReplicas')]",
+            "maxReplicas": "[parameters('maxReplicas')]",
+        }
         assert container_app["properties"]["configuration"]["registries"][0]["identity"] == (
             "[variables('effectiveManagedIdentityId')]"
         )
-        container_env = container_app["properties"]["template"]["containers"][0]["env"]
-        serialized_container_env = json.dumps(container_env)
-        assert "ENTRA_ADMIN_GROUP_ID" in serialized_container_env
-        assert "PYRIT_CONFIG_FILE" in serialized_container_env
-        assert "PYRIT_ENV_AKV_REF" in serialized_container_env
-        ingress_restrictions = container_app["properties"]["configuration"]["ingress"]["ipSecurityRestrictions"]
-        assert "variables('effectiveAllowedCidr')" in ingress_restrictions
-        effective_allowed_cidr = template["variables"]["effectiveAllowedCidr"]
-        assert "parameters('allowedCidr')" in effective_allowed_cidr
-        assert "parameters('enableFrontDoor')" in effective_allowed_cidr
-        assert "fail(" in effective_allowed_cidr
-        assert not _resources(template, "Microsoft.Network/privateEndpoints")
-        assert not _resources(template, "Microsoft.Network/applicationGateways")
-        cors_value = next(
-            value["value"]
-            for value in container_app["properties"]["template"]["containers"][0]["env"]
-            if isinstance(value, dict) and value.get("name") == "PYRIT_CORS_ORIGINS"
-        )
-        assert "aca-front-door" in cors_value
-        assert "outputs.endpointHostName.value" in cors_value
-        assert "Microsoft.Cdn/profiles/afdEndpoints" in cors_value
-        assert ".publicNetworkAccess" in cors_value
 
     def test_main_gates_application_and_infrastructure_independently(self) -> None:
         template = _compile_bicep(MAIN_BICEP, self.output_directory / "app-only.json")
 
-        assert template["parameters"]["deployInfra"]["defaultValue"] is True
-        assert template["parameters"]["deployApp"]["defaultValue"] is True
-        assert template["parameters"]["containerImage"]["defaultValue"] == ""
-        apps = _resources(template, "Microsoft.App/containerApps")
-        assert len(apps) == 1
-        assert apps[0]["condition"] == "[parameters('deployApp')]"
-        assert apps[0]["properties"]["template"]["containers"][0]["image"] == "[variables('effectiveContainerImage')]"
-        image = template["variables"]["effectiveContainerImage"]
-        assert "and(parameters('deployApp'), empty(parameters('containerImage')))" in image
-        assert "fail('containerImage is required when deployApp is true')" in image
-        for resource in template["resources"]:
-            if resource["type"] == "Microsoft.App/containerApps":
-                continue
-            condition = resource["condition"]
-            if resource["type"] == "Microsoft.ContainerRegistry/registries":
-                condition = template["variables"]["createAcr"]
-                assert "fail('App-only deployment requires an existing registry')" in condition
-            elif resource["type"] == "Microsoft.ManagedIdentity/userAssignedIdentities":
-                condition = template["variables"]["createManagedIdentity"]
-                assert "fail('App-only deployment requires existingManagedIdentityResourceId')" in condition
-            assert "parameters('deployInfra')" in condition
+        phases = _resources(template, "Microsoft.Resources/deployments")
+        assert len(phases) == len(template["resources"]) == 2
+        infrastructure = next(phase for phase in phases if "-infrastructure" in phase["name"])
+        application = next(phase for phase in phases if "-application" in phase["name"])
+        assert infrastructure["condition"] == "[parameters('deployInfra')]"
+        assert application["condition"] == "[parameters('deployApp')]"
+        assert any("-infrastructure" in dependency for dependency in application["dependsOn"])
+        application_parameters = application["properties"]["parameters"]
+        identity = application_parameters["existingManagedIdentityResourceId"]
+        assert identity.startswith("[if(parameters('deployInfra'),")
+        assert "outputs.managedIdentityResourceId.value" in identity
+        assert identity.endswith(", createObject('value', parameters('existingManagedIdentityResourceId')))]")
+        registry = application_parameters["acrName"]
+        assert registry.startswith("[if(parameters('deployInfra'),")
+        assert "outputs.acrLoginServer.value" in registry
+        assert registry.endswith(", createObject('value', parameters('acrName')))]")
+        for name, value in application_parameters.items():
+            if name not in {"acrName", "existingManagedIdentityResourceId"}:
+                assert "reference(" not in value["value"], name
+        assert not infrastructure.get("dependsOn")
 
         outputs = template["outputs"]
+        assert set(outputs) == {
+            "appFqdn",
+            "frontDoorFqdn",
+            "frontDoorUrl",
+            "frontDoorPrivateLinkRequestMessage",
+            "containerAppsPublicNetworkAccess",
+            "publicFqdn",
+            "environmentDefaultDomain",
+            "egressPublicIpAddress",
+            "natGatewayId",
+            "acaInfrastructureSubnetId",
+            "managedIdentityPrincipalId",
+            "managedIdentityResourceId",
+            "sqlAadSetupRequired",
+            "keyVaultName",
+            "acrLoginServer",
+            "vnetName",
+            "appInsightsConnectionString",
+        }
+        assert all(output["type"] == "string" for output in outputs.values())
         assert outputs["egressPublicIpAddress"]["value"].startswith("[if(parameters('deployInfra'),")
         assert "Microsoft.Network/publicIPAddresses" in outputs["egressPublicIpAddress"]["value"]
         assert "Microsoft.Cdn/profiles/afdEndpoints" in outputs["frontDoorFqdn"]["value"]
         assert "parameters('deployInfra')" in outputs["frontDoorFqdn"]["value"]
         assert outputs["appFqdn"]["value"].startswith("[if(parameters('deployApp'),")
         assert "reference(resourceId('Microsoft.App/containerApps'" in outputs["appFqdn"]["value"]
+        for name in (
+            "containerAppsPublicNetworkAccess",
+            "environmentDefaultDomain",
+            "natGatewayId",
+            "acaInfrastructureSubnetId",
+            "managedIdentityPrincipalId",
+            "managedIdentityResourceId",
+            "acrLoginServer",
+            "vnetName",
+        ):
+            assert outputs[name]["value"].startswith("[if(parameters('deployInfra'),"), name
+        assert outputs["frontDoorPrivateLinkRequestMessage"]["value"].endswith(", '')]")
+
+    def test_main_forwards_phase_parameters_and_secure_values(self) -> None:
+        template = _compile_bicep(MAIN_BICEP, self.output_directory / "forwarding.json")
+
+        for phase in _resources(template, "Microsoft.Resources/deployments"):
+            parameters = phase["properties"]["parameters"]
+            nested = phase["properties"]["template"]
+            assert "subscriptionId" not in phase
+            assert "resourceGroup" not in phase
+            assert set(parameters) == set(nested["parameters"])
+            assert {"deployInfra", "deployApp"}.isdisjoint(parameters)
+            assert phase["properties"]["expressionEvaluationOptions"]["scope"] == "inner"
+            for name, parameter in parameters.items():
+                if "-application" not in phase["name"] or name not in {
+                    "acrName",
+                    "existingManagedIdentityResourceId",
+                }:
+                    assert parameter["value"] == f"[parameters('{name}')]", name
+                assert nested["parameters"][name]["type"] == template["parameters"][name]["type"]
+                if "-application" not in phase["name"] or name not in {
+                    "containerImage",
+                    "existingManagedIdentityResourceId",
+                }:
+                    assert nested["parameters"][name].get("defaultValue") == template["parameters"][name].get(
+                        "defaultValue"
+                    ), name
+            for secret in {"envFileContents", "pyritConfigFileUri", "logAnalyticsSharedKey"} & set(parameters):
+                assert nested["parameters"][secret]["type"] == "securestring"
+                assert secret not in json.dumps(nested["outputs"])
+        for secret in ("envFileContents", "pyritConfigFileUri", "logAnalyticsSharedKey"):
+            assert template["parameters"][secret]["type"] == "securestring"
+            assert secret not in json.dumps(template["outputs"])
+
+    def test_standalone_phases_have_disjoint_write_sets(self) -> None:
+        infrastructure = _compile_bicep(INFRASTRUCTURE_BICEP, self.output_directory / "infrastructure.json")
+        application = _compile_bicep(APPLICATION_BICEP, self.output_directory / "application.json")
+
+        assert {
+            "containerImage",
+            "entraTenantId",
+            "entraClientId",
+            "sqlServerFqdn",
+            "sqlDatabaseName",
+            "keyVaultResourceId",
+            "pyritConfigFileUri",
+            "envFileContents",
+        }.isdisjoint(infrastructure["parameters"])
+        assert {
+            "vnetAddressPrefix",
+            "infrastructureSubnetAddressPrefix",
+            "enableFrontDoorPrivateLink",
+            "disableContainerAppsPublicAccess",
+            "protectEgressPublicIp",
+            "logAnalyticsSharedKey",
+        }.isdisjoint(application["parameters"])
+        infrastructure_resources = infrastructure["resources"] + [
+            resource
+            for module in _resources(infrastructure, "Microsoft.Resources/deployments")
+            for resource in module["properties"]["template"]["resources"]
+        ]
+        infrastructure_types = {resource["type"] for resource in infrastructure_resources}
+        assert infrastructure_types == {
+            "Microsoft.Resources/deployments",
+            "Microsoft.ContainerRegistry/registries",
+            "Microsoft.OperationalInsights/workspaces",
+            "Microsoft.Insights/components",
+            "Microsoft.ManagedIdentity/userAssignedIdentities",
+            "Microsoft.App/managedEnvironments",
+            "Microsoft.Network/publicIPAddresses",
+            "Microsoft.Authorization/locks",
+            "Microsoft.Network/natGateways",
+            "Microsoft.Network/virtualNetworks",
+            "Microsoft.Cdn/profiles",
+            "Microsoft.Cdn/profiles/afdEndpoints",
+            "Microsoft.Cdn/profiles/originGroups",
+            "Microsoft.Cdn/profiles/originGroups/origins",
+            "Microsoft.Cdn/profiles/afdEndpoints/routes",
+        }
+        assert len(application["resources"]) == 1
+        assert application["resources"][0]["type"] == "Microsoft.App/containerApps"
+        assert application["resources"][0]["type"] not in infrastructure_types
+        assert "condition" not in application["resources"][0]
+        assert {
+            "frontDoorPrivateLinkRequestMessage",
+            "frontDoorFqdn",
+            "environmentDefaultDomain",
+            "containerAppsPublicNetworkAccess",
+            "egressPublicIpAddress",
+            "natGatewayId",
+            "acaInfrastructureSubnetId",
+            "vnetName",
+            "managedIdentityResourceId",
+            "managedIdentityPrincipalId",
+            "acrLoginServer",
+            "appInsightsConnectionString",
+        } <= set(infrastructure["outputs"])
+        assert set(application["outputs"]) == {
+            "appFqdn",
+            "frontDoorFqdn",
+            "containerAppsPublicNetworkAccess",
+        }
+
+    def test_application_reads_existing_state_and_preserves_authentication(self) -> None:
+        template = _compile_bicep(APPLICATION_BICEP, self.output_directory / "application-config.json")
+
+        for name in ("containerImage", "existingManagedIdentityResourceId"):
+            assert template["parameters"][name]["minLength"] == 1
+            assert "defaultValue" not in template["parameters"][name]
+        assert "fail(" in template["variables"]["validatedAllowedGroupObjectIds"]
+        assert "fail(" in template["variables"]["validatedAdminGroupObjectId"]
+        assert "trim(" in template["variables"]["normalizedAllowedGroupObjectIds"]
+        assert "trim(" in template["variables"]["normalizedAdminGroupObjectId"]
+        assert "fail('App-only deployment requires an existing registry')" in template["variables"]["effectiveAcrName"]
+        effective_allowed_cidr = template["variables"]["effectiveAllowedCidr"]
+        assert "parameters('allowedCidr')" in effective_allowed_cidr
+        assert "parameters('enableFrontDoor')" in effective_allowed_cidr
+        assert "fail(" in effective_allowed_cidr
+        container_app = _resources(template, "Microsoft.App/containerApps")[0]
+        assert container_app["identity"]["type"] == "UserAssigned"
+        assert container_app["properties"]["template"]["containers"][0]["image"] == "[parameters('containerImage')]"
+        identity = template["variables"]["effectiveManagedIdentityId"]
+        assert "resourceId(" in identity or "extensionResourceId(" in identity
+        assert "variables('existingManagedIdentitySegments')[2]" in identity
+        assert "variables('existingManagedIdentitySegments')[4]" in identity
+        assert "Microsoft.ManagedIdentity/userAssignedIdentities" in identity
+        container_env = container_app["properties"]["template"]["containers"][0]["env"]
+        environment = {value["name"]: value["value"] for value in container_env if isinstance(value, dict)}
+        assert "validatedAllowedGroupObjectIds" in environment["ENTRA_ALLOWED_GROUP_IDS"]
+        assert "validatedAdminGroupObjectId" in environment["ENTRA_ADMIN_GROUP_ID"]
+        assert "Microsoft.ManagedIdentity/userAssignedIdentities" in environment["AZURE_CLIENT_ID"]
+        assert ".clientId" in environment["AZURE_CLIENT_ID"]
+        assert environment["ENTRA_CLIENT_ID"] == "[parameters('entraClientId')]"
+        assert environment["ENTRA_TENANT_ID"] == "[parameters('entraTenantId')]"
+        assert "parameters('enableOtel')" in environment["OTEL_EXPORTER_OTLP_ENDPOINT"]
+        assert "http://localhost:4318" in environment["OTEL_EXPORTER_OTLP_ENDPOINT"]
+        secrets = container_app["properties"]["configuration"]["secrets"]
+        assert "parameters('envFileContents')" in secrets
+        assert "parameters('pyritConfigFileUri')" in secrets
+        serialized_container_env = json.dumps(container_env)
+        assert "'secretRef', 'env-file'" in serialized_container_env
+        assert "'secretRef', 'config-file-uri'" in serialized_container_env
+        assert "PYRIT_CONFIG_FILE" in serialized_container_env
+        assert "PYRIT_ENV_AKV_REF" in serialized_container_env
+        assert "keyvaultDns" in serialized_container_env
+        cors_value = environment["PYRIT_CORS_ORIGINS"]
+        assert "parameters('enableFrontDoor')" in cors_value
+        assert "Microsoft.Cdn/profiles/afdEndpoints" in cors_value
+        assert ".hostName" in cors_value
+        assert "uniqueString(subscription().id, resourceGroup().id, parameters('appName'))" in cors_value
+        assert "Microsoft.App/managedEnvironments" in cors_value
+        assert ".publicNetworkAccess" in cors_value
+        assert "'Disabled'" in cors_value
+        assert ".defaultDomain" in cors_value
+        assert "Microsoft.Resources/deployments" not in json.dumps(template)
+        assert "deployInfra" not in json.dumps(template)
+        assert "deployApp" not in json.dumps(template)
 
     def test_aca_nat_network_is_static_and_delegated(self):
         template = _compile_bicep(NETWORK_BICEP, self.output_directory / "network.json")

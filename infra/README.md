@@ -414,9 +414,18 @@ az deployment group show -g <rg> -n <deployment-name> \
 
 Qualifying merges to `main` automatically deploy **the app to test without infrastructure reconciliation**. Production remains opt-in: manually queue a commit merged to `main` with `deployToProd=true`. Approval rejects on timeout and the requester cannot self-approve. All stages remain in the run graph: infrastructure stages show **Skipped** when `deployInfra=false`, just as production stages do when production is disabled. App deployment accepts that intentional skip, but an infrastructure failure or cancellation blocks it.
 
-#### Shared application deployment
+#### Deployment structure
 
-Both stages use `infra/pipelines/deploy_gui.sh` through the existing `AzureCLI@2` Bash `scriptPath` mechanism. The infrastructure stage passes `deployInfra=true, deployApp=false` to `main.bicep`; the app stage passes `deployInfra=false, deployApp=true`. Only the app stage applies the Container App definition, once per environment. There is no separate image-update implementation.
+All four deployment stages reuse `infra/pipelines/deploy-stage.yml`, which keeps the variable groups, deployment job, checkout, and `AzureCLI@2` Bash task in one place. Each stage supplies its existing name, dependencies, runtime condition, slot, and phase:
+
+| Phase | Script | Bicep template | Owns |
+| --- | --- | --- | --- |
+| Infrastructure | `infra/pipelines/deploy_infra.sh` | `infra/infrastructure.bicep` | Shared infrastructure and Private Link cutover/recovery |
+| App | `infra/pipelines/deploy_app.sh` | `infra/application.bicep` | Container App image and configuration |
+
+The scripts share scope validation, preview, and readiness helpers in `deployment_common.sh`, but do not dispatch between phases or pass deployment-mode flags to Bicep. Only the app stage applies the Container App definition, once per environment.
+
+#### Application deployment
 
 **App-only is not image-only:** it reconciles the image and Bicep-defined application configuration, including environment variables, identity attachment, ingress, and scaling. It requires the same variable groups and existing topology as infrastructure-enabled deployment. Shared infrastructure resources are referenced rather than redeployed, and the app-only preview rejects writes outside the existing Container App. The existing ACA environment public/private access mode and Front Door resources are preserved.
 
@@ -424,7 +433,7 @@ The script verifies the exact requested revision and its access mode: direct ACA
 
 App deployment does not downgrade or create a database; application startup still follows the image's normal migration behavior. App-stage failures do not invoke infrastructure, image, or database rollback because migrations may make the previous image incompatible. The previous image digest is logged for an explicit recovery decision.
 
-Direct community deployments keep their existing behavior: `main.bicep` defaults both `deployInfra` and `deployApp` to `true`, and requires `containerImage` when deploying the app. Separate phases use **Incremental** deployment mode so omitted resources are not deleted. The internal app stage requires existing infrastructure, a managed identity, and a registry.
+Direct community deployments keep their existing behavior: `main.bicep` composes the two Bicep modules, defaults both `deployInfra` and `deployApp` to `true`, and requires `containerImage` when deploying the app. Those flags gate whole modules in the wrapper; the internal pipeline calls the phase templates directly. Separate phases use **Incremental** deployment mode so omitted resources are not deleted. The internal app stage requires existing infrastructure, a managed identity, and a registry.
 
 #### Optional infrastructure deployment
 
@@ -432,7 +441,7 @@ Set `deployInfra=true` when changing shared infrastructure or networking. Each i
 
 Front Door routes the GUI and its relative `/api` requests on the same origin. Infrastructure readiness checks therefore do not need to redeploy the app's CORS settings; those settings are reconciled in the app stage. Entra redirect URI registration remains an external prerequisite, and infrastructure health is not a browser sign-in check. Cross-origin clients need the app stage's updated CORS configuration before using a newly introduced origin.
 
-`infra/pipelines/deploy_gui.sh` retains the existing infrastructure safeguards:
+`infra/pipelines/deploy_infra.sh` retains the existing infrastructure safeguards:
 
 1. Build the source image and push a commit-SHA tag to ACR.
 2. Capture the exact pushed digest for the app stages; infrastructure reads the current image only to verify that the running app remains healthy.
@@ -468,7 +477,7 @@ Both `copyrit-gui-test` and `copyrit-gui-prod` supply:
 | `keyVaultResourceId`, `envSecretName` | Existing runtime configuration secret |
 | `acrResourceId`, `enableOtel` | Registry resource ID and observability setting |
 
-The container image is not a library variable. The Build stage publishes the exact pushed digest as `immutableImage`, and both app stages consume that output. Infrastructure stages discover the existing image directly from ACA for health verification only. All deployment stages consume the environment configuration above; app configuration changes do not require `deployInfra=true`, but shared infrastructure changes do. Do not add the legacy `image`, `resourceGroup`, `appName`, or `enablePrivateEndpoint` variables; the current workflow does not consume them.
+The container image is not a library variable. The Build stage publishes the exact pushed digest as `immutableImage`, and both app stages consume that output. Infrastructure stages discover the existing image directly from ACA for health verification only. The stage template passes network-prefix variables only to infrastructure, and image, Entra, SQL, Key Vault, and application-config variables only to the app. Common scope, identity, registry, and observability inputs go to both. App configuration changes do not require `deployInfra=true`, but shared infrastructure changes do. Do not add the legacy `image`, `resourceGroup`, `appName`, or `enablePrivateEndpoint` variables; the current workflow does not consume them.
 
 Pipeline definition 139 reads `gui-deploy.yml` from the GitHub commit being queued. Treat YAML and variable-group contract changes as one release: do not remove old keys before the commit that consumes the replacement keys reaches the target branch. Otherwise ADO leaves unresolved `$(name)` text in Bash, where it is interpreted as command substitution.
 
@@ -479,6 +488,10 @@ The resource group, registry, image-pull authorization, managed identity, Key Va
 The internal workflow is update-only for networking: its app name and prefixes must resolve to the existing app/environment/VNet/subnet/NAT/PIP. It records the current PIP resource ID and address before preview, requires protected resources to remain unchanged except Azure read-only normalization, and verifies the same PIP/address after deployment.
 
 The optional infrastructure stage also creates a `CanNotDelete` lock scoped to the reserved PIP. Its validated Front Door origin uses Private Link to the ACA environment, and the ACA public endpoint is disabled after a successful infrastructure deployment. App-only runs preserve that environment access mode, including an existing public-access fallback.
+
+#### Validation
+
+Local tests cover stage wiring, parameter construction, input and what-if policies, and failure-handling helpers. Bicep tests compile the real templates and check resource ownership and the combined community entry point. They do not simulate ARM's deployment behavior. Validate service behavior with an Azure what-if and a test-environment run; a successful app-only run does not validate infrastructure cutover.
 
 ## Post-Deployment
 

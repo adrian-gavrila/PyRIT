@@ -1,37 +1,11 @@
 // ============================================================================
 // PyRIT GUI — Azure Container Apps Deployment (Security-Hardened)
 //
-// Deploys the CoPyRIT GUI as an Azure Container App with:
-// - Azure Front Door Premium public entry point
-// - VNet-integrated public workload-profiles environment with fixed NAT egress
-// - MSAL PKCE authentication (frontend) + Microsoft Graph-backed auth (backend)
-// - User-assigned managed identity for Azure SQL, ACR, Azure OpenAI, Key Vault
-// - Azure SQL (existing) via managed identity — no passwords
-// - Inline ACA secret or backend-managed Key Vault environment source
-// - Centralized logging via Log Analytics (configurable retention)
-// - No storage account keys or secrets embedded in source/container images
-//
-// Prerequisites:
-// 1. An Entra ID app registration (no secrets/certs needed — PKCE public client)
-// 2. A container image pushed to an Azure Container Registry (unique tag or digest)
-// 3. Existing Azure SQL server with Entra admin configured
-//
-// Usage:
-//   az deployment group create \
-//     --resource-group <rg> \
-//     --template-file infra/main.bicep \
-//     --parameters appName=pyrit-gui \
-//                  containerImage=<acr>.azurecr.io/pyrit:<commit-sha> \
-//                  entraClientId=<app-registration-client-id> \
-//                  entraTenantId=<tenant-id> \
-//                  allowedGroupObjectIds=<comma-separated-entra-group-ids> \
-//                  allowedCidr='<your-corp-vpn-cidr>' \
-//                  sqlServerFqdn=<your-server>.database.windows.net \
-//                  sqlDatabaseName=<your-database> \
-//                  keyVaultResourceId=<key-vault-resource-id>
+// Community entry point composing shared infrastructure and application phases.
+// Prerequisites: an Entra ID app registration, a versioned ACR image, and an
+// existing Azure SQL server/database and Key Vault. Grant the managed identity
+// the required roles before the first application revision (see infra/README.md).
 // ============================================================================
-
-// --- Parameters ---
 
 @description('Name for the Container App and related resources')
 @minLength(2)
@@ -51,10 +25,6 @@ param deployInfra bool = true
 @description('Deploy the Container App image and configuration. False leaves the existing application untouched.')
 param deployApp bool = true
 
-var effectiveContainerImage = deployApp && empty(containerImage)
-  ? fail('containerImage is required when deployApp is true')
-  : containerImage
-
 @description('Entra ID tenant ID')
 param entraTenantId string
 
@@ -65,21 +35,9 @@ param entraClientId string
 @minLength(1)
 param allowedGroupObjectIds string
 
-var normalizedAllowedGroupObjectIds = filter(
-  map(split(allowedGroupObjectIds, ','), groupId => trim(groupId)),
-  groupId => !empty(groupId)
-)
-var validatedAllowedGroupObjectIds = !empty(normalizedAllowedGroupObjectIds)
-  ? normalizedAllowedGroupObjectIds
-  : fail('allowedGroupObjectIds must contain at least one non-empty group ID')
-
 @description('Object ID of the Entra security group allowed to manage backend configuration')
 @minLength(1)
 param adminGroupObjectId string
-var normalizedAdminGroupObjectId = trim(adminGroupObjectId)
-var validatedAdminGroupObjectId = !empty(normalizedAdminGroupObjectId)
-  ? normalizedAdminGroupObjectId
-  : fail('adminGroupObjectId must contain a non-empty group ID')
 
 @description('CIDR range allowed to reach ACA directly. Empty = unrestricted. Must be empty when Front Door is enabled because ACA sees Front Door backend IPs, not client IPs.')
 param allowedCidr string = ''
@@ -92,10 +50,6 @@ param sqlServerFqdn string
 
 @description('Azure SQL database name')
 param sqlDatabaseName string
-
-// --- PyRIT Configuration (.pyrit_conf equivalent) ---
-// Note: operator and operation are per-user settings configured in the GUI,
-// not deployment-level config.
 
 @description('Comma-separated PyRIT initializers to run. Defaults register target configs and attack techniques.')
 param pyritInitializer string = 'target,technique'
@@ -182,218 +136,77 @@ param frontDoorPrivateLinkRequestMessage string = 'Azure Front Door private acce
 @description('Disable the ACA environment public endpoint after Front Door Private Link is configured')
 param disableContainerAppsPublicAccess bool = false
 
-// Determine whether to create or reference existing resources
-var effectiveAllowedCidr = enableFrontDoor && !empty(allowedCidr)
-  ? fail('allowedCidr must be empty when enableFrontDoor is true')
-  : allowedCidr
-var effectiveFrontDoorPrivateLink = enableFrontDoorPrivateLink && !enableFrontDoor
-  ? fail('enableFrontDoor must be true when enableFrontDoorPrivateLink is true')
-  : enableFrontDoorPrivateLink
-var effectiveContainerAppsPublicAccess = deployInfra
-  ? (disableContainerAppsPublicAccess
-    ? (effectiveFrontDoorPrivateLink ? 'Disabled' : fail('Front Door Private Link is required before ACA public access can be disabled'))
-    : 'Enabled')
-  : existingAcaEnvironment!.properties.publicNetworkAccess
-var createLogAnalytics = logAnalyticsWorkspaceId == ''
-var createAcr = acrResourceId == '' && acrName == ''
-  ? (deployInfra ? true : fail('App-only deployment requires an existing registry'))
-  : false
-var useInlineEnvFile = !empty(envFileContents)
-var createManagedIdentity = empty(existingManagedIdentityResourceId)
-  ? (deployInfra ? true : fail('App-only deployment requires existingManagedIdentityResourceId'))
-  : false
-var generatedAcrName = '${padLeft(replace(appName, '-', ''), 2, 'p')}acr'
-var existingManagedIdentitySegments = split(existingManagedIdentityResourceId, '/')
-var existingManagedIdentitySubscriptionId = createManagedIdentity ? subscription().subscriptionId : existingManagedIdentitySegments[2]
-var existingManagedIdentityResourceGroupName = createManagedIdentity ? resourceGroup().name : existingManagedIdentitySegments[4]
-var existingManagedIdentityName = createManagedIdentity ? '' : last(existingManagedIdentitySegments)
-
-module acaNatNetwork './modules/aca_nat_network.bicep' = if (deployInfra) {
-  name: '${appName}-aca-nat-network'
+module infrastructure './infrastructure.bicep' = if (deployInfra) {
+  name: '${appName}-infrastructure'
   params: {
-    namePrefix: appName
+    appName: appName
     location: location
-    tags: tags
     vnetAddressPrefix: vnetAddressPrefix
     infrastructureSubnetAddressPrefix: infrastructureSubnetAddressPrefix
     egressPublicIpTags: egressPublicIpTags
     protectEgressPublicIp: protectEgressPublicIp
+    logRetentionDays: logRetentionDays
+    logAnalyticsWorkspaceId: logAnalyticsWorkspaceId
+    logAnalyticsCustomerId: logAnalyticsCustomerId
+    logAnalyticsSharedKey: logAnalyticsSharedKey
+    acrResourceId: acrResourceId
+    acrName: acrName
+    existingManagedIdentityResourceId: existingManagedIdentityResourceId
+    enableOtel: enableOtel
+    enableFrontDoor: enableFrontDoor
+    enableFrontDoorPrivateLink: enableFrontDoorPrivateLink
+    frontDoorPrivateLinkRequestMessage: frontDoorPrivateLinkRequestMessage
+    disableContainerAppsPublicAccess: disableContainerAppsPublicAccess
+    tags: tags
   }
 }
 
-// ============================================================================
-// Azure Container Registry (created only if neither acrResourceId nor acrName is provided)
-// ============================================================================
-resource newAcr 'Microsoft.ContainerRegistry/registries@2023-08-01-preview' = if (createAcr) {
-  name: generatedAcrName
-  location: location
-  tags: tags
-  sku: {
-    name: 'Standard'
-  }
-  properties: {
-    adminUserEnabled: false
-  }
-}
-
-var effectiveAcrName = createAcr ? newAcr.name : (acrName != '' ? acrName : last(split(acrResourceId, '/')))
-var effectiveAcrServer = '${effectiveAcrName}.azurecr.io'
-
-// ============================================================================
-// Log Analytics Workspace
-// Created only if logAnalyticsWorkspaceId is not provided. For orgs with a
-// central governance workspace, pass the existing workspace ID instead.
-// Note: The ACA environment requires a shared key to connect to Log Analytics.
-// This is the only supported integration method as of the 2024-03-01 API.
-// The key is used during deployment for log ingestion config only — it is NOT
-// injected into the container or accessible to application code.
-// ============================================================================
-resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = if (deployInfra && createLogAnalytics) {
-  name: '${appName}-logs'
-  location: location
-  tags: tags
-  properties: {
-    sku: {
-      name: 'PerGB2018'
-    }
-    retentionInDays: logRetentionDays
+module application './application.bicep' = if (deployApp) {
+  name: '${appName}-application'
+  params: {
+    appName: appName
+    location: location
+    containerImage: containerImage
+    entraTenantId: entraTenantId
+    entraClientId: entraClientId
+    allowedGroupObjectIds: allowedGroupObjectIds
+    adminGroupObjectId: adminGroupObjectId
+    sqlServerFqdn: sqlServerFqdn
+    sqlDatabaseName: sqlDatabaseName
+    pyritInitializer: pyritInitializer
+    pyritConfigFileUri: pyritConfigFileUri
+    envSecretName: envSecretName
+    envFileContents: envFileContents
+    cpuCores: cpuCores
+    memoryGb: memoryGb
+    minReplicas: minReplicas
+    maxReplicas: maxReplicas
+    allowedCidr: allowedCidr
+    allowedCidrDescription: allowedCidrDescription
+    keyVaultResourceId: keyVaultResourceId
+    acrResourceId: acrResourceId
+    acrName: deployInfra ? split(infrastructure!.outputs.acrLoginServer, '.')[0] : acrName
+    existingManagedIdentityResourceId: deployInfra
+      ? infrastructure!.outputs.managedIdentityResourceId
+      : existingManagedIdentityResourceId
+    enableOtel: enableOtel
+    enableFrontDoor: enableFrontDoor
+    tags: tags
   }
 }
 
-var effectiveLogAnalyticsCustomerIdValue = createLogAnalytics ? logAnalytics!.properties.customerId : logAnalyticsCustomerId
-var effectiveLogAnalyticsKeyValue = createLogAnalytics ? logAnalytics!.listKeys().primarySharedKey : logAnalyticsSharedKey
-
-// ============================================================================
-// Application Insights (created when OTel is enabled — destination for traces/logs)
-// ============================================================================
-resource appInsights 'Microsoft.Insights/components@2020-02-02' = if (deployInfra && enableOtel) {
-  name: '${appName}-ai'
-  location: location
-  tags: tags
-  kind: 'web'
-  properties: {
-    Application_Type: 'web'
-    WorkspaceResourceId: createLogAnalytics ? logAnalytics.id : logAnalyticsWorkspaceId
-  }
-}
-
-// ============================================================================
-// User-Assigned Managed Identity
-// Created BEFORE the container app so roles can be granted before the first
-// revision starts. This avoids the chicken-and-egg problem with system-assigned
-// MI where the revision tries to pull images / access KV before RBAC propagates.
-// ============================================================================
-resource managedIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = if (createManagedIdentity) {
-  name: '${appName}-identity'
-  location: location
-  tags: tags
-}
-
-resource referencedManagedIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' existing = if (!createManagedIdentity) {
-  name: existingManagedIdentityName
-  scope: resourceGroup(existingManagedIdentitySubscriptionId, existingManagedIdentityResourceGroupName)
-}
-
-var effectiveManagedIdentityId = createManagedIdentity ? managedIdentity!.id : referencedManagedIdentity!.id
-var effectiveManagedIdentityClientId = createManagedIdentity
-  ? managedIdentity!.properties.clientId
-  : referencedManagedIdentity!.properties.clientId
-var effectiveManagedIdentityPrincipalId = createManagedIdentity
-  ? managedIdentity!.properties.principalId
-  : referencedManagedIdentity!.properties.principalId
-
-// ============================================================================
-// Key Vault (existing — avoids soft-delete/purge-protection redeployment issues)
-// All auth uses managed identity (Azure SQL, ACR, AOAI). The vault is for
-// downstream API keys or sensitive config added as ACA Key Vault secret
-// references. Ensure the vault has RBAC authorization enabled.
-// ============================================================================
-// Extract KV name and resource group from the resource ID.
-// keyVaultResourceId format: /subscriptions/.../resourceGroups/<rg>/providers/.../vaults/<name>
-var keyVaultName = last(split(keyVaultResourceId, '/'))
-
-// ============================================================================
-// RBAC role assignments are NOT managed by this template.
-// Grant the following roles to the UAMI manually before first deployment:
-//   - Key Vault Secrets Officer on the Key Vault when envFileContents is empty
-//   - AcrPull                 on the ACR
-// See Post-Deployment in infra/README.md for commands.
-// ============================================================================
-
-// ============================================================================
-// Azure Container Apps Environment (workload profiles)
-// Public ACA-managed HTTPS ingress with optional app-level IP restrictions and
-// VNet-integrated fixed NAT egress.
-//
-// OTel: When enableOtel=true, configure the managed OTel agent
-// as a post-deploy CLI step (2024-03-01 schema does not support it natively).
-// ============================================================================
-resource acaEnvironment 'Microsoft.App/managedEnvironments@2024-10-02-preview' = if (deployInfra) {
-  name: '${appName}-env'
-  location: location
-  tags: tags
-  properties: {
-    appLogsConfiguration: {
-      destination: 'log-analytics'
-      logAnalyticsConfiguration: {
-        customerId: effectiveLogAnalyticsCustomerIdValue
-        dynamicJsonColumns: false
-        sharedKey: effectiveLogAnalyticsKeyValue
-      }
-    }
-    peerAuthentication: {
-      mtls: {
-        enabled: false
-      }
-    }
-    peerTrafficConfiguration: {
-      encryption: {
-        enabled: false
-      }
-    }
-    publicNetworkAccess: effectiveContainerAppsPublicAccess
-    workloadProfiles: [
-      {
-        name: 'Consumption'
-        workloadProfileType: 'Consumption'
-      }
-    ]
-    vnetConfiguration: {
-      infrastructureSubnetId: acaNatNetwork!.outputs.infrastructureSubnetId
-      internal: false
-    }
-  }
+// Existing reads retain the public outputs when either phase is skipped.
+resource existingContainerApp 'Microsoft.App/containerApps@2024-03-01' existing = if (!deployApp) {
+  name: appName
 }
 
 resource existingAcaEnvironment 'Microsoft.App/managedEnvironments@2024-10-02-preview' existing = if (!deployInfra) {
   name: '${appName}-env'
 }
 
-var environmentDefaultDomain = deployInfra
-  ? acaEnvironment!.properties.defaultDomain
-  : existingAcaEnvironment!.properties.defaultDomain
-var acaOriginHostName = '${appName}.${environmentDefaultDomain}'
-
-module acaFrontDoor './modules/aca_front_door.bicep' = if (deployInfra && enableFrontDoor) {
-  name: '${appName}-aca-front-door'
-  params: {
-    namePrefix: appName
-    originHostName: acaOriginHostName
-    tags: tags
-    enablePrivateLink: effectiveFrontDoorPrivateLink
-    originResourceId: acaEnvironment.id
-    originLocation: location
-    privateLinkRequestMessage: frontDoorPrivateLinkRequestMessage
-  }
-}
-
 resource existingFrontDoorEndpoint 'Microsoft.Cdn/profiles/afdEndpoints@2024-09-01' existing = if (!deployInfra && enableFrontDoor) {
   name: '${appName}-afd/${appName}-${take(uniqueString(subscription().id, resourceGroup().id, appName), 8)}'
 }
-
-var frontDoorHostName = enableFrontDoor
-  ? (deployInfra ? acaFrontDoor!.outputs.endpointHostName : existingFrontDoorEndpoint!.properties.hostName)
-  : ''
 
 resource existingEgressPublicIp 'Microsoft.Network/publicIPAddresses@2024-05-01' existing = if (!deployInfra) {
   name: '${appName}-egress-pip'
@@ -403,196 +216,29 @@ resource existingAppInsights 'Microsoft.Insights/components@2020-02-02' existing
   name: '${appName}-ai'
 }
 
-// NOTE: When enableOtel=true, configure the OpenTelemetry managed agent on the
-// environment as a post-deployment step using az CLI:
-//   az containerapp env telemetry app-insights set \
-//     --name ${appName}-env -g <rg> \
-//     --connection-string <app-insights-connection-string>
-// The Bicep API (2024-03-01) does not support openTelemetryConfiguration natively.
-
-// ============================================================================
-// Container App — PyRIT GUI
-// ============================================================================
-resource containerApp 'Microsoft.App/containerApps@2024-03-01' = if (deployApp) {
-  name: appName
-  location: location
-  tags: tags
-  identity: {
-    type: 'UserAssigned'
-    userAssignedIdentities: {
-      '${effectiveManagedIdentityId}': {}
-    }
-  }
-  // RBAC roles (AcrPull, Key Vault Secrets Officer) must be granted manually before
-  // the first deployment — see infra/README.md Post-Deployment §2.
-  dependsOn: []
-  properties: {
-    managedEnvironmentId: acaEnvironment.id
-    configuration: {
-      // Single revision mode — only one revision serves traffic (appropriate for GUI)
-      activeRevisionsMode: 'Single'
-
-      // ACA-managed public HTTPS ingress, optionally restricted by source CIDR.
-      ingress: {
-        external: true
-        targetPort: 8000
-        transport: 'http'
-        allowInsecure: false
-        ipSecurityRestrictions: effectiveAllowedCidr != '' ? [
-          {
-            name: 'allowed-cidr'
-            description: allowedCidrDescription
-            ipAddressRange: effectiveAllowedCidr
-            action: 'Allow'
-          }
-        ] : []
-      }
-
-      // ACR pull with managed identity (works whether ACR is created or existing)
-      registries: [
-        {
-          server: effectiveAcrServer
-          identity: effectiveManagedIdentityId
-        }
-      ]
-
-      secrets: concat(
-        useInlineEnvFile ? [
-          {
-            name: 'env-file'
-            value: envFileContents
-          }
-        ] : [],
-        !empty(pyritConfigFileUri) ? [
-          {
-            name: 'config-file-uri'
-            value: pyritConfigFileUri
-          }
-        ] : []
-      )
-    }
-
-    template: {
-      containers: [
-        {
-          name: 'pyrit-gui'
-          image: effectiveContainerImage
-          resources: {
-            cpu: json(cpuCores)
-            memory: '${memoryGb}Gi'
-          }
-          env: [
-            {
-              name: 'PYRIT_MODE'
-              value: 'gui'
-            }
-            {
-              name: 'AZURE_SQL_SERVER'
-              value: sqlServerFqdn
-            }
-            {
-              name: 'AZURE_SQL_DATABASE'
-              value: sqlDatabaseName
-            }
-            // .pyrit_conf equivalent (operator/operation set per-user in GUI)
-            {
-              name: 'PYRIT_INITIALIZER'
-              value: pyritInitializer
-            }
-            // Keep the managed-identity config URI out of plain Container App configuration.
-            !empty(pyritConfigFileUri)
-              ? {
-                  name: 'PYRIT_CONFIG_FILE'
-                  secretRef: 'config-file-uri'
-                }
-              : {
-                  name: 'PYRIT_CONFIG_FILE'
-                  value: ''
-                }
-            useInlineEnvFile
-              ? {
-                  name: 'PYRIT_ENV_CONTENTS'
-                  secretRef: 'env-file'
-                }
-              : {
-                  name: 'PYRIT_ENV_AKV_REF'
-                  value: 'https://${keyVaultName}${environment().suffixes.keyvaultDns}/secrets/${envSecretName}'
-                }
-            // MSAL PKCE auth config — frontend uses these to authenticate users
-            // Easy Auth is NOT used because the tenant blocks client secrets/certs
-            // on app registrations. PKCE (public client) needs no secrets.
-            {
-              name: 'ENTRA_CLIENT_ID'
-              value: entraClientId
-            }
-            {
-              name: 'ENTRA_TENANT_ID'
-              value: entraTenantId
-            }
-            {
-              name: 'ENTRA_ALLOWED_GROUP_IDS'
-              value: join(validatedAllowedGroupObjectIds, ',')
-            }
-            {
-              name: 'ENTRA_ADMIN_GROUP_ID'
-              value: validatedAdminGroupObjectId
-            }
-            // OTel: point the SDK at the ACA managed agent (localhost sidecar)
-            {
-              name: 'OTEL_EXPORTER_OTLP_ENDPOINT'
-              value: enableOtel ? 'http://localhost:4318' : ''
-            }
-            {
-              name: 'OTEL_SERVICE_NAME'
-              value: appName
-            }
-            // DefaultAzureCredential needs the UAMI client ID to pick the correct identity
-            {
-              name: 'AZURE_CLIENT_ID'
-              value: effectiveManagedIdentityClientId
-            }
-            // The ACA URL is usable only while environment public access remains enabled.
-            {
-              name: 'PYRIT_CORS_ORIGINS'
-              value: enableFrontDoor
-                ? (effectiveContainerAppsPublicAccess == 'Disabled'
-                  ? 'https://${frontDoorHostName}'
-                  : 'https://${acaOriginHostName},https://${frontDoorHostName}')
-                : 'https://${acaOriginHostName}'
-            }
-          ]
-        }
-      ]
-      scale: {
-        minReplicas: minReplicas
-        maxReplicas: maxReplicas
-      }
-    }
-  }
-}
-
-resource existingContainerApp 'Microsoft.App/containerApps@2024-03-01' existing = if (!deployApp) {
-  name: appName
+var requiredExistingManagedIdentityId = !deployInfra && empty(existingManagedIdentityResourceId)
+  ? fail('App-only deployment requires existingManagedIdentityResourceId')
+  : existingManagedIdentityResourceId
+var existingManagedIdentitySegments = split(requiredExistingManagedIdentityId, '/')
+resource referencedManagedIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' existing = if (!deployInfra) {
+  name: deployInfra ? '' : last(existingManagedIdentitySegments)
+  scope: resourceGroup(
+    deployInfra ? subscription().subscriptionId : existingManagedIdentitySegments[2],
+    deployInfra ? resourceGroup().name : existingManagedIdentitySegments[4]
+  )
 }
 
 var appHostName = deployApp
-  ? containerApp!.properties.configuration.ingress.fqdn
+  ? application!.outputs.appFqdn
   : existingContainerApp!.properties.configuration.ingress.fqdn
-
-// ============================================================================
-// NOTE: Easy Auth (authConfigs) is intentionally NOT used.
-// The tenant's credential policy blocks client secrets and trusted-CA-only
-// certificates on app registrations, making Easy Auth's OAuth authorization
-// code flow impossible. Instead, authentication is handled in-app using
-// MSAL with PKCE (public client flow) — no secrets needed.
-// The frontend uses @azure/msal-browser to acquire a delegated Microsoft Graph
-// token; the backend validates it through trusted Graph endpoints and applies
-// local group-based authorization.
-// ============================================================================
-
-// ============================================================================
-// Outputs
-// ============================================================================
+var frontDoorHostName = enableFrontDoor
+  ? (deployInfra ? infrastructure!.outputs.frontDoorFqdn : existingFrontDoorEndpoint!.properties.hostName)
+  : ''
+var existingAcrName = acrName != ''
+  ? acrName
+  : (acrResourceId != ''
+    ? last(split(acrResourceId, '/'))
+    : (deployInfra ? '' : fail('App-only deployment requires an existing registry')))
 
 @description('The generated ACA FQDN; inaccessible when ACA public network access is disabled')
 output appFqdn string = appHostName
@@ -604,49 +250,63 @@ output frontDoorFqdn string = frontDoorHostName
 output frontDoorUrl string = enableFrontDoor ? 'https://${frontDoorHostName}' : ''
 
 @description('The deterministic ACA Private Link approval request message; empty when Private Link is disabled')
-output frontDoorPrivateLinkRequestMessage string = deployInfra && effectiveFrontDoorPrivateLink
-  ? acaFrontDoor!.outputs.privateLinkRequestMessage
+output frontDoorPrivateLinkRequestMessage string = deployInfra
+  ? infrastructure!.outputs.frontDoorPrivateLinkRequestMessage
   : ''
 
 @description('ACA environment public network access state')
-output containerAppsPublicNetworkAccess string = effectiveContainerAppsPublicAccess
+output containerAppsPublicNetworkAccess string = deployInfra
+  ? infrastructure!.outputs.containerAppsPublicNetworkAccess
+  : existingAcaEnvironment!.properties.publicNetworkAccess
 
 @description('The public application FQDN selected for this deployment')
 output publicFqdn string = enableFrontDoor ? frontDoorHostName : appHostName
 
 @description('The default domain of the ACA environment')
-output environmentDefaultDomain string = environmentDefaultDomain
+output environmentDefaultDomain string = deployInfra
+  ? infrastructure!.outputs.environmentDefaultDomain
+  : existingAcaEnvironment!.properties.defaultDomain
 
 @description('Static outbound IPv4 address')
-output egressPublicIpAddress string = deployInfra ? acaNatNetwork!.outputs.egressPublicIpAddress : existingEgressPublicIp!.properties.ipAddress
+output egressPublicIpAddress string = deployInfra
+  ? infrastructure!.outputs.egressPublicIpAddress
+  : existingEgressPublicIp!.properties.ipAddress
 
 @description('NAT Gateway resource ID')
-output natGatewayId string = deployInfra ? acaNatNetwork!.outputs.natGatewayId : resourceId('Microsoft.Network/natGateways', '${appName}-nat')
+output natGatewayId string = deployInfra
+  ? infrastructure!.outputs.natGatewayId
+  : resourceId('Microsoft.Network/natGateways', '${appName}-nat')
 
 @description('ACA infrastructure subnet resource ID')
-output acaInfrastructureSubnetId string = deployInfra ? acaNatNetwork!.outputs.infrastructureSubnetId : resourceId('Microsoft.Network/virtualNetworks/subnets', '${appName}-vnet', '${appName}-aca-subnet')
+output acaInfrastructureSubnetId string = deployInfra
+  ? infrastructure!.outputs.acaInfrastructureSubnetId
+  : resourceId('Microsoft.Network/virtualNetworks/subnets', '${appName}-vnet', '${appName}-aca-subnet')
 
 @description('The principal ID of the user-assigned managed identity — grant this Cognitive Services OpenAI User on your AOAI instances and db_datareader/db_datawriter on Azure SQL')
-output managedIdentityPrincipalId string = effectiveManagedIdentityPrincipalId
+output managedIdentityPrincipalId string = deployInfra
+  ? infrastructure!.outputs.managedIdentityPrincipalId
+  : referencedManagedIdentity!.properties.principalId
 
 @description('The resource ID of the user-assigned managed identity')
-output managedIdentityResourceId string = effectiveManagedIdentityId
+output managedIdentityResourceId string = deployInfra
+  ? infrastructure!.outputs.managedIdentityResourceId
+  : referencedManagedIdentity!.id
 
 @description('IMPORTANT: Create an Azure AD contained user in the target database for this managed identity. See README post-deployment steps.')
-output sqlAadSetupRequired string = createManagedIdentity
+output sqlAadSetupRequired string = deployInfra && empty(existingManagedIdentityResourceId)
   ? 'Run CREATE USER [${appName}-identity] FROM EXTERNAL PROVIDER on database ${sqlDatabaseName}'
   : 'Verify the existing managed identity has the required contained user and database roles on ${sqlDatabaseName}'
 
 @description('Key Vault name (existing)')
-output keyVaultName string = keyVaultName
+output keyVaultName string = last(split(keyVaultResourceId, '/'))
 
 @description('ACR login server')
-output acrLoginServer string = effectiveAcrServer
+output acrLoginServer string = deployInfra ? infrastructure!.outputs.acrLoginServer : '${existingAcrName}.azurecr.io'
 
 @description('Virtual network name')
-output vnetName string = deployInfra ? acaNatNetwork!.outputs.vnetName : '${appName}-vnet'
+output vnetName string = deployInfra ? infrastructure!.outputs.vnetName : '${appName}-vnet'
 
 @description('Application Insights connection string (if OTel enabled)')
 output appInsightsConnectionString string = enableOtel
-  ? (deployInfra ? appInsights!.properties.ConnectionString : existingAppInsights!.properties.ConnectionString)
+  ? (deployInfra ? infrastructure!.outputs.appInsightsConnectionString : existingAppInsights!.properties.ConnectionString)
   : 'N/A (OTel disabled)'
