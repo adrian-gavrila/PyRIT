@@ -173,15 +173,22 @@ class TestPipelineGuardrails(unittest.TestCase):
         assert task["inputs"]["allowApproversToApproveTheirOwnRuns"] is False
         assert '"$BUILD_SOURCEBRANCH" != refs/heads/main' in self.pipeline_text
 
-    def test_community_parameter_files_keep_combined_deployment_defaults(self) -> None:
-        for filename in ("parameters.example.json", "parameters.demo.json"):
-            parameters = json.loads((REPO_ROOT / "infra" / filename).read_text(encoding="utf-8"))["parameters"]
-            assert "deployInfra" not in parameters
-            assert "deployApp" not in parameters
-            assert parameters["containerImage"]["value"]
-            assert parameters["existingManagedIdentityResourceId"]["value"]
-            assert parameters["enableFrontDoorPrivateLink"]["value"] is False
-            assert parameters["disableContainerAppsPublicAccess"]["value"] is False
+    def test_community_parameter_files_are_phase_specific(self) -> None:
+        infrastructure = json.loads(
+            (REPO_ROOT / "infra" / "parameters.infrastructure.example.json").read_text(encoding="utf-8")
+        )["parameters"]
+        application = json.loads(
+            (REPO_ROOT / "infra" / "parameters.application.example.json").read_text(encoding="utf-8")
+        )["parameters"]
+
+        assert "containerImage" not in infrastructure
+        assert infrastructure["existingManagedIdentityResourceId"]["value"]
+        assert infrastructure["enableFrontDoorPrivateLink"]["value"] is False
+        assert infrastructure["disableContainerAppsPublicAccess"]["value"] is False
+        assert application["containerImage"]["value"]
+        assert application["existingManagedIdentityResourceId"]["value"]
+        assert "enableFrontDoorPrivateLink" not in application
+        assert "disableContainerAppsPublicAccess" not in application
 
 
 class TestWhatIfPolicies(unittest.TestCase):

@@ -96,7 +96,7 @@ When `ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`, and `ENTRA_ALLOWED_GROUP_IDS` are all
 Local dev → Build and push image → Preview Bicep changes → Deploy → Complete post-deployment steps
 ```
 
-Community users can deploy `main.bicep` directly using the instructions below. For a fully provisioned isolated instance, use `deploy_instance.py` and [DEPLOY_NEW_INSTANCE.md](DEPLOY_NEW_INSTANCE.md). `gui-deploy.yml` is the Microsoft team's internal Azure DevOps workflow; it depends on team-owned ADO configuration and is not the community deployment interface.
+Community users can deploy `infrastructure.bicep` followed by `application.bicep` using the instructions below. For a fully provisioned isolated instance, use `deploy_instance.py` and [DEPLOY_NEW_INSTANCE.md](DEPLOY_NEW_INSTANCE.md). `gui-deploy.yml` is the Microsoft team's internal Azure DevOps workflow; it depends on team-owned ADO configuration and is not the community deployment interface.
 
 `deploy_instance.py` uses the default `enableFrontDoor=false` path. Use direct Bicep when a community deployment needs Front Door. The script still automates resource creation, Entra setup, inline secrets, and selected RBAC, but its documented SQL and provider post-deployment steps remain required.
 
@@ -105,7 +105,7 @@ Community users can deploy `main.bicep` directly using the instructions below. F
 - **Authentication**: [MSAL](https://learn.microsoft.com/en-us/entra/msal/) [PKCE](https://oauth.net/2/pkce/) on the frontend (`@azure/msal-browser`) and public-client device-code authentication for the PyRIT CLI, backed by Microsoft Graph middleware on the backend. Both clients send delegated Graph tokens, and the backend authenticates them through Graph `/me`. These public-client flows require no client secrets or certificates.
 - **Authorization**: Entra group checks use `allowedGroupObjectIds` for application access and `adminGroupObjectId` for backend configuration routes. Requires delegated Graph `User.Read`; the backend calls `/me/checkMemberGroups` and compares the returned transitive memberships with the configured group IDs. Each security group must also be assigned to the enterprise app (see Prerequisites §3). Authenticated deployments require at least one allowed group and fail to start without one. `/api/health`, `/api/auth/config`, and `/api/media` are intentional public exceptions; other `/api` routes require authentication when auth is enabled. Successful identity and membership results are cached in-process for 60 seconds, keyed by a SHA-256 token digest, to reduce Graph latency and throttling. Bearer tokens themselves are not stored in the cache.
 - **Identity**: `deploy_instance.py` creates its user-assigned managed identity (UAMI) and grants AcrPull and Storage Blob Data Contributor before deploying Bicep. A direct Bicep deployment can create `<appName>-identity`, but the template creates no role assignments, so its first revision can remain unhealthy until required roles are granted and the revision is restarted. A healthy one-pass direct deployment uses an existing, pre-authorized UAMI. `AZURE_CLIENT_ID` is set to the UAMI's client ID so `DefaultAzureCredential` selects the correct identity.
-- **Network**: With the default `deployInfra=true`, the template creates a VNet-integrated external Container Apps environment, one delegated ACA infrastructure subnet, a Standard NAT Gateway, and a static outbound IPv4. ACA supplies the generated HTTPS hostname and trusted certificate. In direct-ACA mode, `allowedCidr` optionally restricts public ingress to one IPv4 CIDR; an empty value permits public ingress. Front Door mode requires `allowedCidr` to be empty because ACA sees Front Door backend addresses, not the original client; Bicep and the team pipeline reject the invalid combination. Entra sign-in, enterprise-app assignment, and backend group checks remain mandatory application access controls.
+- **Network**: `infrastructure.bicep` creates a VNet-integrated external Container Apps environment, one delegated ACA infrastructure subnet, a Standard NAT Gateway, and a static outbound IPv4. ACA supplies the generated HTTPS hostname and trusted certificate. In direct-ACA mode, `allowedCidr` optionally restricts public ingress to one IPv4 CIDR; an empty value permits public ingress. Front Door mode requires `allowedCidr` to be empty because ACA sees Front Door backend addresses, not the original client; Bicep and the team pipeline reject the invalid combination. Entra sign-in, enterprise-app assignment, and backend group checks remain mandatory application access controls.
 - **Front Door**: `enableFrontDoor=true` creates a Premium profile, managed `azurefd.net` endpoint, HTTPS ACA origin, `/api/health` probe, uncached catch-all route, and 240-second origin response timeout matching the ACA HTTP ingress limit. `enableFrontDoorPrivateLink=true` targets the ACA managed environment with group ID `managedEnvironments`. The resulting private endpoint connection must be approved before AFD can route privately. `disableContainerAppsPublicAccess=true` disables the ACA environment public endpoint and CORS then permits only the AFD origin. The module does not create a WAF policy; application authentication and authorization remain mandatory.
 - **Routing**: Inbound requests through Front Door do not traverse the NAT Gateway. When ACA public access remains enabled, users can also reach ACA directly. When Private Link is enabled and public access is disabled, all public application traffic enters through Front Door. Outbound connections from the ACA environment that leave the virtual network use the NAT Gateway's static public IPv4.
 - **Response headers**: `SecurityHeadersMiddleware` adds [CSP](https://developer.mozilla.org/en-US/docs/Web/HTTP/CSP), HTTP Strict Transport Security (HSTS, production only), X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Permissions-Policy, and Cache-Control (`no-store` on API routes). Swagger/OpenAPI disabled in production.
@@ -120,7 +120,7 @@ Community users can deploy `main.bicep` directly using the instructions below. F
 
 > **Before you begin**: Run `az login` and confirm your subscription with `az account show`. You need permissions to create Entra app registrations, security groups, and Azure resource deployments.
 
-The Bicep template creates the Container Apps resources, dedicated network, NAT Gateway, static egress IP, and (unless supplied) Log Analytics workspace. It can also declare an ACR and UAMI, but it does not push an image or create RBAC role assignments. The supported one-pass workflows therefore use an existing ACR; a healthy one-pass direct Bicep deployment also uses an existing, pre-authorized UAMI. Entra resources must be created separately through Microsoft Graph. Bicep requires an existing Key Vault. See [Post-Deployment §2](#post-deployment) for direct-deployment RBAC.
+The infrastructure and application Bicep templates create the Container Apps resources, dedicated network, NAT Gateway, static egress IP, and (unless supplied) Log Analytics workspace. Infrastructure can also declare an ACR and UAMI, but it does not push an image or create RBAC role assignments. The supported one-pass workflows therefore use an existing ACR and pre-authorized UAMI. Entra resources must be created separately through Microsoft Graph. The application template requires an existing Key Vault. See [Post-Deployment §2](#post-deployment) for direct-deployment RBAC.
 
 Front Door is optional. When enabled, the subscription must have the `Microsoft.Cdn` resource provider registered. Private Link requires Front Door Premium and a workload-profiles ACA environment in a [supported Private Link region](https://learn.microsoft.com/azure/frontdoor/private-link#region-availability). The deployment principal also needs permission to read AFD origins and approve `Microsoft.App/managedEnvironments/privateEndpointConnections`. Azure requires ACA public network access to be disabled before private endpoints can be enabled, so converting an existing public origin has an unavoidable interval while the request is pending and AFD propagates the approval. The team workflow performs this cutover in a maintenance window and redeploys the prior public-origin configuration if post-cutover validation fails.
 
@@ -173,11 +173,12 @@ az account show --query tenantId -o tsv
 > **Fresh app registrations only**: The ACA and optional Front Door hostnames are known after deployment. For a newly created app with no existing SPA redirects, register the selected public URL and add the ACA URL only while ACA public access is enabled:
 >
 > ```bash
-> ACA_FQDN=$(az deployment group show -g <rg> -n <deployment-name> \
+> ACA_FQDN=$(az deployment group show -g <rg> -n <application-deployment-name> \
 >   --query properties.outputs.appFqdn.value -o tsv)
-> PUBLIC_FQDN=$(az deployment group show -g <rg> -n <deployment-name> \
->   --query properties.outputs.publicFqdn.value -o tsv)
-> ACA_PUBLIC_ACCESS=$(az deployment group show -g <rg> -n <deployment-name> \
+> FRONT_DOOR_FQDN=$(az deployment group show -g <rg> -n <infrastructure-deployment-name> \
+>   --query properties.outputs.frontDoorFqdn.value -o tsv)
+> PUBLIC_FQDN=${FRONT_DOOR_FQDN:-$ACA_FQDN}
+> ACA_PUBLIC_ACCESS=$(az deployment group show -g <rg> -n <infrastructure-deployment-name> \
 >   --query properties.outputs.containerAppsPublicNetworkAccess.value -o tsv)
 > APP_OBJECT_ID=$(az ad app show --id "$APP_ID" --query id -o tsv)
 > REDIRECT_URIS=$(jq -cn \
@@ -325,7 +326,7 @@ echo "containerImage: $ACR_NAME.azurecr.io/pyrit:$COMMIT_SHA"
 
 ### 6. Key Vault (existing)
 
-`main.bicep` consumes an existing Key Vault reference; it never creates or deletes a vault. `deploy_instance.py` creates its vault before invoking Bicep. Secret behavior depends on the deployment path:
+`application.bicep` consumes an existing Key Vault reference; it never creates or deletes a vault. `deploy_instance.py` creates its vault before invoking Bicep. Secret behavior depends on the deployment path:
 
 - `deploy_instance.py` passes `.env` content through `envFileContents`; Key Vault is a locked-down backup/audit copy and runtime does not read it.
 - Direct Bicep deployments with empty `envFileContents` let PyRIT resolve and update `envSecretName` through the app UAMI. The identity needs `Key Vault Secrets Officer`, and the vault network policy must permit the Container Apps environment.
@@ -350,11 +351,16 @@ Use `what-if` to see what Azure will create, modify, or delete — without makin
 
 ```bash
 az deployment group what-if \
-  --name <deployment-name> \
+  --name <infrastructure-deployment-name> \
   --resource-group <rg> \
-  --template-file infra/main.bicep \
-  --parameters @infra/parameters.json \
-  --parameters existingManagedIdentityResourceId="<uami-resource-id>"
+  --template-file infra/infrastructure.bicep \
+  --parameters @infra/parameters.infrastructure.json
+
+az deployment group what-if \
+  --name <application-deployment-name> \
+  --resource-group <rg> \
+  --template-file infra/application.bicep \
+  --parameters @infra/parameters.application.json
 ```
 
 The output shows a color-coded diff: green (+) for new resources, orange (~) for modifications, red (-) for deletions, and purple (\*) for no change.
@@ -364,17 +370,24 @@ The output shows a color-coded diff: green (+) for new resources, orange (~) for
 For a healthy one-pass direct deployment, set `acrName` or `acrResourceId` to an existing registry and set `existingManagedIdentityResourceId` to a UAMI that already has AcrPull and all required data-plane permissions. If `envFileContents` is empty, that identity also needs `Key Vault Secrets Officer` and a network path to the vault. If Bicep creates the identity instead, expect to grant its roles after resource creation and restart the failed revision.
 
 ```bash
-# Copy and fill in parameters
-cp infra/parameters.example.json infra/parameters.json
-# Edit parameters.json with your values
+# Copy and fill in the phase-specific parameters
+cp infra/parameters.infrastructure.example.json infra/parameters.infrastructure.json
+cp infra/parameters.application.example.json infra/parameters.application.json
 
-# Deploy
+# Deploy infrastructure first, then the application
 az deployment group create \
-  --name <deployment-name> \
+  --name <infrastructure-deployment-name> \
   --resource-group <rg> \
-  --template-file infra/main.bicep \
-  --parameters @infra/parameters.json \
-  --parameters existingManagedIdentityResourceId="<uami-resource-id>"
+  --template-file infra/infrastructure.bicep \
+  --mode Incremental \
+  --parameters @infra/parameters.infrastructure.json
+
+az deployment group create \
+  --name <application-deployment-name> \
+  --resource-group <rg> \
+  --template-file infra/application.bicep \
+  --mode Incremental \
+  --parameters @infra/parameters.application.json
 ```
 
 ### Deployment outputs
@@ -383,20 +396,19 @@ Use deployment outputs rather than reconstructing public hostnames:
 
 | Output | Meaning |
 | --- | --- |
-| `publicFqdn` | User-facing hostname: Front Door when enabled, otherwise ACA |
-| `frontDoorFqdn`, `frontDoorUrl` | Managed Front Door hostname/URL; empty when disabled |
+| `frontDoorFqdn` | Managed Front Door hostname; empty when disabled |
 | `appFqdn` | Generated ACA hostname; inaccessible when ACA public access is disabled |
 | `containerAppsPublicNetworkAccess` | Effective ACA environment public-access state |
 | `frontDoorPrivateLinkRequestMessage` | Deterministic Private Link approval request message; empty when disabled |
 | `egressPublicIpAddress` | Static outbound NAT IPv4 for provider allowlists |
 | `natGatewayId`, `acaInfrastructureSubnetId`, `vnetName` | Created network resources |
 | `managedIdentityPrincipalId`, `managedIdentityResourceId` | UAMI identifiers for RBAC and SQL setup |
-| `acrLoginServer`, `keyVaultName` | Effective existing/created service names |
+| `acrLoginServer` | Effective existing/created registry hostname |
 | `appInsightsConnectionString` | Application Insights value when OTel is enabled |
 
 ```bash
-az deployment group show -g <rg> -n <deployment-name> \
-  --query properties.outputs
+az deployment group show -g <rg> -n <infrastructure-deployment-name> --query properties.outputs
+az deployment group show -g <rg> -n <application-deployment-name> --query properties.outputs
 ```
 
 ### Microsoft team Azure DevOps deployment
@@ -433,7 +445,7 @@ The script verifies the exact requested revision and its access mode: direct ACA
 
 App deployment does not downgrade or create a database; application startup still follows the image's normal migration behavior. App-stage failures do not invoke infrastructure, image, or database rollback because migrations may make the previous image incompatible. The previous image digest is logged for an explicit recovery decision.
 
-Direct community deployments keep their existing behavior: `main.bicep` composes the two Bicep modules, defaults both `deployInfra` and `deployApp` to `true`, and requires `containerImage` when deploying the app. Those flags gate whole modules in the wrapper; the internal pipeline calls the phase templates directly. Separate phases use **Incremental** deployment mode so omitted resources are not deleted. The internal app stage requires existing infrastructure, a managed identity, and a registry.
+Direct community deployments use the same two templates as the internal pipeline: deploy `infrastructure.bicep` before `application.bicep`. Both phases use **Incremental** deployment mode so omitted resources are not deleted. The application phase requires existing infrastructure, a managed identity, and a registry.
 
 #### Optional infrastructure deployment
 
@@ -491,18 +503,19 @@ The optional infrastructure stage also creates a `CanNotDelete` lock scoped to t
 
 #### Validation
 
-Local tests cover stage wiring, parameter construction, input and what-if policies, and failure-handling helpers. Bicep tests compile the real templates and check resource ownership and the combined community entry point. They do not simulate ARM's deployment behavior. Validate service behavior with an Azure what-if and a test-environment run; a successful app-only run does not validate infrastructure cutover.
+Local tests cover stage wiring, parameter construction, input and what-if policies, and failure-handling helpers. Bicep tests compile the real phase templates and check resource ownership. They do not simulate ARM's deployment behavior. Validate service behavior with an Azure what-if and a test-environment run; a successful app-only run does not validate infrastructure cutover.
 
 ## Post-Deployment
 
 1. **Configure browser and CLI public-client authentication** without removing existing migration/rollback URIs:
 
    ```bash
-   ACA_FQDN=$(az deployment group show -g <rg> -n <deployment-name> \
+   ACA_FQDN=$(az deployment group show -g <rg> -n <application-deployment-name> \
      --query properties.outputs.appFqdn.value -o tsv)
-   PUBLIC_FQDN=$(az deployment group show -g <rg> -n <deployment-name> \
-     --query properties.outputs.publicFqdn.value -o tsv)
-   ACA_PUBLIC_ACCESS=$(az deployment group show -g <rg> -n <deployment-name> \
+   FRONT_DOOR_FQDN=$(az deployment group show -g <rg> -n <infrastructure-deployment-name> \
+     --query properties.outputs.frontDoorFqdn.value -o tsv)
+   PUBLIC_FQDN=${FRONT_DOOR_FQDN:-$ACA_FQDN}
+   ACA_PUBLIC_ACCESS=$(az deployment group show -g <rg> -n <infrastructure-deployment-name> \
      --query properties.outputs.containerAppsPublicNetworkAccess.value -o tsv)
    APP_OBJECT_ID=$(az ad app show --id <entraClientId> --query id -o tsv)
    CURRENT_URIS=$(az rest --method GET \
@@ -576,8 +589,11 @@ Local tests cover stage wiring, parameter construction, input and what-if polici
 ## Access the GUI
 
 ```bash
-PUBLIC_FQDN=$(az deployment group show -g <rg> -n <deployment-name> \
-  --query properties.outputs.publicFqdn.value -o tsv)
+ACA_FQDN=$(az deployment group show -g <rg> -n <application-deployment-name> \
+  --query properties.outputs.appFqdn.value -o tsv)
+FRONT_DOOR_FQDN=$(az deployment group show -g <rg> -n <infrastructure-deployment-name> \
+  --query properties.outputs.frontDoorFqdn.value -o tsv)
+PUBLIC_FQDN=${FRONT_DOOR_FQDN:-$ACA_FQDN}
 echo "Public URL: https://$PUBLIC_FQDN"
 ```
 
@@ -660,7 +676,7 @@ Supported Azure integrations, including OpenAI, Content Safety, and Speech, can 
   az containerapp env telemetry app-insights set \
     --name <appName>-env -g <rg> --connection-string "$AI_CONN"
   ```
-- **Existing resources**: Log Analytics, ACR, and a UAMI can be supplied as existing resources; Key Vault must be supplied. With `deployInfra=true`, the template creates its dedicated VNet, ACA subnet, NAT Gateway, and egress public IP; app-only deployment leaves these existing resources untouched. Although Bicep can declare an ACR when no registry is supplied, a separate bootstrap is required to push the image and authorize its identity before the app can run.
+- **Existing resources**: Log Analytics, ACR, and a UAMI can be supplied to the infrastructure template; Key Vault must be supplied to the application template. Infrastructure creates its dedicated VNet, ACA subnet, NAT Gateway, and egress public IP; app-only deployment leaves these existing resources untouched. Although Bicep can declare an ACR when no registry is supplied, a separate bootstrap is required to push the image and authorize its identity before the app can run.
 - **Azure CLI**: Version 2.84+ required (2.77 has a known bug).
 
 ## Teardown and Redeployment
