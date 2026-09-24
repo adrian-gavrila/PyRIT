@@ -12,7 +12,7 @@ import asyncio
 import logging
 import uuid
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, final
@@ -41,6 +41,9 @@ from pyrit.models import (
     ScenarioRunPlanSeedPrompt,
     ScenarioRunSizeComponent,
     ScenarioRunSizeEstimate,
+    ScenarioRunSizeEstimateCondition,
+    ScenarioRunSizeEstimateStatus,
+    ScenarioRunSizeFactor,
     ScenarioRunState,
     config_hash,
 )
@@ -163,6 +166,7 @@ class Scenario(ABC):
         default_dataset_config: DatasetAttackConfiguration,
         objective_scorer: Scorer,
         scenario_result_id: uuid.UUID | str | None = None,
+        uses_default_adversarial_target: bool | None = None,
     ) -> None:
         """
         Initialize a scenario.
@@ -177,6 +181,9 @@ class Scenario(ABC):
             default_dataset_config (DatasetAttackConfiguration): The default dataset configuration used
                 when no ``dataset_config`` is passed to ``initialize_async``.
             objective_scorer (Scorer): The objective scorer used to evaluate attack results.
+            uses_default_adversarial_target (bool | None): Whether this scenario uses the shared
+                adversarial target. None derives usage from its registered technique factories.
+                Scenarios that build their own attacks or supply explicit targets declare this directly.
             scenario_result_id (uuid.UUID | str | None): Optional ID of an existing scenario result to resume.
                 Can be either a UUID object or a string representation of a UUID.
                 If provided and found in memory, the scenario will resume from prior progress.
@@ -205,6 +212,7 @@ class Scenario(ABC):
         self._technique_class = technique_class
         self._default_technique = technique_class.default()
         self._default_dataset_config = default_dataset_config
+        self._uses_default_adversarial_target = uses_default_adversarial_target
 
         # These will be set in initialize_async
         self._objective_target: PromptTarget | None = None
@@ -229,6 +237,7 @@ class Scenario(ABC):
         self._atomic_attacks: list[AtomicAttack] = []
         self._scenario_result_id: str | None = str(scenario_result_id) if scenario_result_id else None
         self._scenario_registry_name: str | None = None
+        self._initial_metadata: dict[str, Any] = {}
         self._active_atomic_groups: dict[str, str] = {}
 
         # Store prepared techniques for use in _build_atomic_attacks_async
@@ -263,6 +272,21 @@ class Scenario(ABC):
         return len(self._atomic_attacks)
 
     @property
+    def uses_default_adversarial_target(self) -> bool:
+        """Whether any available technique uses the shared adversarial target."""
+        if self._uses_default_adversarial_target is not None:
+            return self._uses_default_adversarial_target
+
+        from pyrit.registry import AttackTechniqueRegistry
+
+        factories = AttackTechniqueRegistry.get_registry_singleton().get_factories()
+        return any(
+            factory.uses_default_adversarial_target
+            for technique in self._technique_class.get_all_techniques()
+            if (factory := factories.get(technique.value)) is not None
+        )
+
+    @property
     def active_atomic_group_ids(self) -> frozenset[str]:
         """The stable IDs of atomic groups currently executing."""
         return frozenset(self._active_atomic_groups)
@@ -275,6 +299,10 @@ class Scenario(ABC):
     def set_scenario_registry_name(self, *, scenario_registry_name: str) -> None:
         """Record the requested registry name for durable run-plan attribution."""
         self._scenario_registry_name = scenario_registry_name
+
+    def set_initial_metadata(self, *, metadata: Mapping[str, Any]) -> None:
+        """Set caller-owned metadata to persist when a new scenario result is created."""
+        self._initial_metadata = dict(metadata)
 
     @classmethod
     def _common_scenario_parameters(cls) -> list[Parameter]:
@@ -607,6 +635,9 @@ class Scenario(ABC):
                 ScenarioRunSizeComponent(
                     label="Baseline",
                     count=seed_group_count,
+                    factors=[
+                        ScenarioRunSizeFactor(label="selected logical seed groups", count=seed_group_count),
+                    ],
                     is_baseline=True,
                     note="One unmodified prompt-sending unit per selected seed group.",
                 )
@@ -632,10 +663,21 @@ class Scenario(ABC):
                 else:
                     estimated_attack_count = None
                     note += " The range covers every compatibility mix that the randomized per-dataset caps can select."
+        status = (
+            ScenarioRunSizeEstimateStatus.Exact
+            if estimated_attack_count is not None
+            else ScenarioRunSizeEstimateStatus.Conditional
+        )
         return ScenarioRunSizeEstimate(
-            estimated_attack_count=estimated_attack_count,
+            status=status,
+            total_attack_count=estimated_attack_count,
             minimum_attack_count=minimum_attack_count,
             maximum_attack_count=maximum_attack_count,
+            condition=(
+                ScenarioRunSizeEstimateCondition.LaunchConfiguration
+                if status is ScenarioRunSizeEstimateStatus.Conditional
+                else None
+            ),
             components=components,
             datasets=datasets,
             note=note,
@@ -659,6 +701,10 @@ class Scenario(ABC):
                 ScenarioRunSizeComponent(
                     label="Default technique sweep",
                     count=seed_group_count * technique_count,
+                    factors=[
+                        ScenarioRunSizeFactor(label="selected logical seed groups", count=seed_group_count),
+                        ScenarioRunSizeFactor(label="selected concrete techniques", count=technique_count),
+                    ],
                 )
             ]
 
@@ -684,6 +730,10 @@ class Scenario(ABC):
                 ScenarioRunSizeComponent(
                     label=technique.value,
                     count=compatible_count,
+                    factors=[
+                        ScenarioRunSizeFactor(label="selected concrete techniques", count=1),
+                        ScenarioRunSizeFactor(label="compatible logical seed groups", count=compatible_count),
+                    ],
                 )
             )
         return components
@@ -979,7 +1029,10 @@ class Scenario(ABC):
             attack_results=attack_results,
             scenario_run_state=ScenarioRunState.CREATED,
             display_group_map=self._display_group_map,
-            metadata=self._build_initial_scenario_metadata(),
+            metadata={
+                **self._build_initial_scenario_metadata(),
+                **self._initial_metadata,
+            },
         )
 
         self._memory.add_scenario_results_to_memory(scenario_results=[result])

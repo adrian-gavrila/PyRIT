@@ -120,12 +120,12 @@ test.describe("Accessibility", () => {
       });
     });
 
-    // Navigate to targets, set active, return to chat so input is enabled
-    await page.getByTitle("Targets").click();
-    await expect(page.getByText("Target Configuration")).toBeVisible({ timeout: 10000 });
-    const setActiveBtn = page.getByRole("button", { name: /set active/i });
-    await expect(setActiveBtn).toBeVisible({ timeout: 5000 });
-    await setActiveBtn.click();
+    // Save an objective default, then open a new chat with that target.
+    await page.getByTitle("Registry").click();
+    await expect(page.getByText("Target Registry")).toBeVisible({ timeout: 10000 });
+    const objectiveDefault = page.getByRole("combobox", { name: "Default objective target", exact: true });
+    await expect(objectiveDefault).toBeVisible({ timeout: 5000 });
+    await objectiveDefault.selectOption({ index: 1 });
     await page.getByTitle("Chat").click();
 
     // Input should be accessible
@@ -146,8 +146,8 @@ test.describe("Accessibility", () => {
     const chatBtn = page.getByTitle("Chat");
     await expect(chatBtn).toBeVisible();
 
-    // Targets button
-    const configBtn = page.getByTitle("Targets");
+    // Registry button
+    const configBtn = page.getByTitle("Registry");
     await expect(configBtn).toBeVisible();
 
     // Theme toggle button (now a menu trigger with "Theme: <mode>" title)
@@ -263,12 +263,12 @@ test.describe("Accessibility", () => {
       });
     });
 
-    // Navigate to targets, set active, return to chat so input is enabled
-    await page.getByTitle("Targets").click();
-    await expect(page.getByText("Target Configuration")).toBeVisible({ timeout: 10000 });
-    const setActiveBtn = page.getByRole("button", { name: /set active/i });
-    await expect(setActiveBtn).toBeVisible({ timeout: 5000 });
-    await setActiveBtn.click();
+    // Save an objective default, then open a new chat with that target.
+    await page.getByTitle("Registry").click();
+    await expect(page.getByText("Target Registry")).toBeVisible({ timeout: 10000 });
+    const objectiveDefault = page.getByRole("combobox", { name: "Default objective target", exact: true });
+    await expect(objectiveDefault).toBeVisible({ timeout: 5000 });
+    await objectiveDefault.selectOption({ index: 1 });
     await page.getByTitle("Chat").click();
 
     const input = page.getByRole("textbox");
@@ -309,14 +309,14 @@ test.describe("Accessibility", () => {
       });
     });
 
-    // Navigate to targets
-    await page.getByTitle("Targets").click();
-    await expect(page.getByText("Target Configuration")).toBeVisible();
+    // Navigate to the registry
+    await page.getByTitle("Registry").click();
+    await expect(page.getByText("Target Registry")).toBeVisible();
 
     // Table should exist
     const table = page.getByRole("table");
     await expect(table).toBeVisible();
-    await expect(page.getByRole("combobox", { name: "Filter by type:" })).toBeVisible();
+    await expect(page.getByRole("combobox", { name: "Filter by type:", exact: true })).toBeVisible();
   });
 
   test("major views expose page headings and one primary navigation landmark", async ({ page }) => {
@@ -333,7 +333,7 @@ test.describe("Accessibility", () => {
 
     const views = [
       { button: "History", heading: "History" },
-      { button: "Targets", heading: "Target Configuration" },
+      { button: "Registry", heading: "Target Registry" },
       { button: "Chat", heading: "Chat" },
     ];
 
@@ -378,9 +378,9 @@ test.describe("Accessibility", () => {
         });
       });
 
-      await page.getByRole("button", { name: "Targets" }).click();
+      await page.getByRole("button", { name: "Registry" }).click();
       await expect(
-        page.getByRole("heading", { level: 1, name: "Target Configuration" })
+        page.getByRole("heading", { level: 1, name: "Target Registry" })
       ).toBeVisible();
       await expect(page.getByRole("button", { name: "Refresh" })).toBeEnabled();
       await expectMinimumTouchTarget(page.getByRole("button", { name: "Refresh" }));
