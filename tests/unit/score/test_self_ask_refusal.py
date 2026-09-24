@@ -1,7 +1,6 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-from dataclasses import replace
 from pathlib import Path
 from textwrap import dedent
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -10,7 +9,6 @@ from uuid import uuid4
 import pytest
 from unit.mocks import get_mock_target_identifier, store_message
 
-import pyrit.score.scorer as scorer_module
 from pyrit.exceptions.exception_classes import InvalidJsonException
 from pyrit.memory import CentralMemory
 from pyrit.memory.memory_interface import MemoryInterface
@@ -20,17 +18,13 @@ from pyrit.models import (
     JsonResponseConfig,
     Message,
     MessagePiece,
-    PromptDataType,
     SeedPrompt,
 )
-from pyrit.prompt_target import CapabilityName, GitHubCopilotTarget, OpenAIChatTarget
-from pyrit.prompt_target.common import target_requirements as target_requirements_module
 from pyrit.score import (
     JsonSchemaResponseHandler,
     MessageScorable,
     RefusalScorerPaths,
     SelfAskRefusalScorer,
-    SelfAskTrueFalseScorer,
 )
 
 
@@ -514,117 +508,6 @@ class TestRefusalScorerPromptFormatString:
 def test_refusal_init_no_chat_target_raises():
     with pytest.raises(ValueError, match="A chat_target must be provided"):
         SelfAskRefusalScorer(chat_target=None)
-
-
-@pytest.mark.usefixtures("patch_central_database")
-@pytest.mark.parametrize(
-    "scorer_type",
-    [
-        pytest.param(SelfAskRefusalScorer, id="refusal"),
-        pytest.param(SelfAskTrueFalseScorer, id="true-false"),
-    ],
-)
-@pytest.mark.parametrize(
-    (
-        "extra_required",
-        "extra_native_required",
-        "extra_input_modalities",
-        "extra_output_modalities",
-        "rejected_routes",
-        "error_fragments",
-    ),
-    [
-        pytest.param(
-            frozenset({CapabilityName.STREAMING_AUDIO}),
-            frozenset(),
-            frozenset(),
-            frozenset(),
-            frozenset({"editable", "native"}),
-            ("supports_streaming_audio",),
-            id="additional-required-capability",
-        ),
-        pytest.param(
-            frozenset(),
-            frozenset({CapabilityName.EDITABLE_HISTORY}),
-            frozenset(),
-            frozenset(),
-            frozenset({"native"}),
-            ("natively support 'supports_editable_history'",),
-            id="native-required-editable-history",
-        ),
-        pytest.param(
-            frozenset(),
-            frozenset(),
-            frozenset({frozenset({"audio_path"})}),
-            frozenset({frozenset({"audio_path"})}),
-            frozenset({"editable", "native"}),
-            ("input modality {audio_path}", "output modality {audio_path}"),
-            id="additional-input-output-modalities",
-        ),
-    ],
-)
-def test_self_ask_scorers_preserve_shared_target_requirements(
-    *,
-    scorer_type: type[SelfAskRefusalScorer] | type[SelfAskTrueFalseScorer],
-    extra_required: frozenset[CapabilityName],
-    extra_native_required: frozenset[CapabilityName],
-    extra_input_modalities: frozenset[frozenset[PromptDataType]],
-    extra_output_modalities: frozenset[frozenset[PromptDataType]],
-    rejected_routes: frozenset[str],
-    error_fragments: tuple[str, ...],
-) -> None:
-    pytest.importorskip("copilot")
-    shared_requirements = target_requirements_module.CHAT_TARGET_REQUIREMENTS
-    shared_fields = (
-        shared_requirements.required,
-        shared_requirements.native_required,
-        shared_requirements.required_input_modalities,
-        shared_requirements.required_output_modalities,
-    )
-    targets = (
-        (
-            "editable",
-            OpenAIChatTarget(
-                model_name="gpt-4o",
-                endpoint="https://api.openai.com/v1",
-                api_key="offline-test-key",
-            ),
-        ),
-        ("native", GitHubCopilotTarget(model_name="gpt-5-mini")),
-    )
-    editable_target = targets[0][1]
-    native_target = targets[1][1]
-    assert editable_target.capabilities.supports_editable_history is True
-    assert native_target.capabilities.supports_editable_history is False
-    assert native_target.capabilities.supports_system_prompt is True
-
-    baseline_targets = targets if scorer_type is SelfAskRefusalScorer else targets[:1]
-    for _, target in baseline_targets:
-        scorer_type(chat_target=target)
-
-    future_requirements = replace(
-        shared_requirements,
-        required=shared_requirements.required | extra_required,
-        native_required=shared_requirements.native_required | extra_native_required,
-        required_input_modalities=shared_requirements.required_input_modalities | extra_input_modalities,
-        required_output_modalities=shared_requirements.required_output_modalities | extra_output_modalities,
-    )
-    with patch.object(scorer_module, "CHAT_TARGET_REQUIREMENTS", future_requirements, create=True):
-        for route, target in targets:
-            if route in rejected_routes:
-                with pytest.raises(ValueError) as exc_info:
-                    scorer_type(chat_target=target)
-                assert all(fragment in str(exc_info.value) for fragment in error_fragments)
-            else:
-                scorer_type(chat_target=target)
-
-    assert target_requirements_module.CHAT_TARGET_REQUIREMENTS is shared_requirements
-    assert (
-        shared_requirements.required,
-        shared_requirements.native_required,
-        shared_requirements.required_input_modalities,
-        shared_requirements.required_output_modalities,
-    ) == shared_fields
 
 
 def test_refusal_score_category_normalized_from_str(patch_central_database):

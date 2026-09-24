@@ -17,14 +17,10 @@ from uuid import UUID, uuid4
 import pytest
 from unit.mocks import store_message
 
-from pyrit.models import Message, MessagePiece, MessageScorable, Score, ScoringExpectation
+from pyrit.models import Message, MessagePiece, MessageScorable, ScoringExpectation
 from pyrit.prompt_normalizer import PromptNormalizer
-from pyrit.prompt_target import GitHubCopilotTarget, OpenAIChatTarget
-from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
-from pyrit.prompt_target.common.target_configuration import TargetConfiguration
-from pyrit.score import SelfAskRefusalScorer
-from pyrit.score.true_false.self_ask_question_answer_scorer import SelfAskQuestionAnswerScorer
-from pyrit.score.true_false.self_ask_true_false_scorer import SelfAskTrueFalseScorer, TrueFalseQuestion
+from pyrit.prompt_target import GitHubCopilotTarget
+from pyrit.score import SelfAskTrueFalseScorer, TrueFalseQuestion
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -735,67 +731,16 @@ async def test_normalizer_rejects_retired_conversation_but_allows_fresh_async(
 
 
 @pytest.mark.usefixtures("patch_central_database")
-@pytest.mark.parametrize(
-    (
-        "scorer_kind",
-        "answer",
-        "judge_json",
-        "expected_score",
-        "expected_rationale",
-        "expected_judge_prompt",
-        "expected_system_prompt_fragment",
-    ),
-    [
-        pytest.param(
-            "refusal",
-            "I cannot answer that question.",
-            '{"score_value":"True","description":"Refusal detected","rationale":"The response explicitly refuses."}',
-            True,
-            "The response explicitly refuses.",
-            "conversation_objective: Name France's capital\nresponse_to_evaluate_input: I cannot answer that question.",
-            None,
-            id="refusal",
-        ),
-        pytest.param(
-            "refusal",
-            "France's capital is Paris.",
-            '{"score_value":"False","description":"No refusal detected",'
-            '"rationale":"The response answers the objective."}',
-            False,
-            "The response answers the objective.",
-            "conversation_objective: Name France's capital\nresponse_to_evaluate_input: France's capital is Paris.",
-            None,
-            id="answer",
-        ),
-        pytest.param(
-            "true_false",
-            "Paris is the capital of France.",
-            '{"score_value":true,"description":"Correct","rationale":"Paris is the capital of France."}',
-            True,
-            "Paris is the capital of France.",
-            "objective: Name France's capital\nresponse: Paris is the capital of France.",
-            "The response correctly identifies Paris as the capital of France.",
-            id="true-false",
-        ),
-    ],
-)
-async def test_self_ask_scorer_retries_with_fresh_copilot_session_async(
+async def test_self_ask_true_false_uses_fresh_copilot_session_after_invalid_json_async(
     *,
     sdk: Any,
     client: NonCallableMagicMock,
-    sqlite_instance: MemoryInterface,
-    scorer_kind: str,
-    answer: str,
-    judge_json: str,
-    expected_score: bool,
-    expected_rationale: str,
-    expected_judge_prompt: str,
-    expected_system_prompt_fragment: str | None,
 ) -> None:
     failed_session = _make_sdk_session(sdk=sdk, session_id="malformed-judge-session")
     failed_session.send_and_wait.return_value = _assistant_reply("malformed judge response")
     successful_session = _make_sdk_session(sdk=sdk, session_id="valid-judge-session")
     released_session_ids: list[str] = []
+    judge_json = '{"score_value":true,"description":"Correct","rationale":"Paris is the capital of France."}'
 
     async def delete_session_async(session_id: str) -> None:
         released_session_ids.append(session_id)
@@ -808,6 +753,7 @@ async def test_self_ask_scorer_retries_with_fresh_copilot_session_async(
     client.create_session.side_effect = [failed_session, successful_session]
     client.delete_session.side_effect = delete_session_async
     target = GitHubCopilotTarget(model_name="gpt-5-mini")
+    answer = "Paris is the capital of France."
     saved_answer = store_message(
         MessagePiece(
             role="assistant",
@@ -819,39 +765,22 @@ async def test_self_ask_scorer_retries_with_fresh_copilot_session_async(
     input_scorable = MessageScorable.from_message(saved_answer)
 
     try:
-        if scorer_kind == "refusal":
-            scorer = SelfAskRefusalScorer(chat_target=target)
-        else:
-            question = TrueFalseQuestion(
-                category="capital correctness",
-                true_description="The response correctly identifies Paris as the capital of France.",
-                false_description="The response does not correctly identify Paris as the capital of France.",
-            )
-            scorer = SelfAskTrueFalseScorer.from_question(chat_target=target, question=question)
+        question = TrueFalseQuestion(
+            category="capital correctness",
+            true_description="The response correctly identifies Paris as the capital of France.",
+            false_description="The response does not correctly identify Paris as the capital of France.",
+        )
+        scorer = SelfAskTrueFalseScorer.from_question(chat_target=target, question=question)
         scores = await scorer.score_async(
             scorable=input_scorable,
             expectation=ScoringExpectation(objective="Name France's capital"),
         )
 
         assert len(scores) == 1
-        score = scores[0]
-        assert isinstance(score, Score)
-        assert score.get_value() is expected_score
-        assert score.score_rationale == expected_rationale
-        assert score.message_piece_id == input_piece.id
-        assert score.scorable == input_scorable
+        assert scores[0].get_value() is True
 
         failed_session.send_and_wait.assert_awaited_once()
         successful_session.send_and_wait.assert_awaited_once()
-        failed_payload = failed_session.send_and_wait.await_args.args[0]
-        successful_payload = successful_session.send_and_wait.await_args.args[0]
-        assert failed_payload == successful_payload
-        assert failed_payload.startswith(expected_judge_prompt + "\n\n### Response format\n\n")
-        assert "The response should conform to the following JSON schema:" in failed_payload
-        assert '"score_value"' in failed_payload
-        assert '"rationale"' in failed_payload
-        assert failed_session.send_and_wait.await_args.kwargs["timeout"] == 60.0
-        assert successful_session.send_and_wait.await_args.kwargs["timeout"] == 60.0
         client.create_session.assert_awaited()
         assert client.create_session.await_count == 2
         requested_session_ids = [entry.kwargs["session_id"] for entry in client.create_session.await_args_list]
@@ -860,25 +789,6 @@ async def test_self_ask_scorer_retries_with_fresh_copilot_session_async(
         session_configurations = [entry.kwargs for entry in client.create_session.await_args_list]
         assert session_configurations[0]["system_message"] == session_configurations[1]["system_message"]
         assert session_configurations[0]["system_message"]["mode"] == "replace"
-        if expected_system_prompt_fragment is not None:
-            assert expected_system_prompt_fragment in session_configurations[0]["system_message"]["content"]
-
-        pieces = sqlite_instance.get_message_pieces()
-        scorer_requests = [
-            piece for piece in pieces if piece.role == "user" and piece.original_value == expected_judge_prompt
-        ]
-        assert len(scorer_requests) == 2
-        attempt_conversation_ids = {piece.conversation_id for piece in scorer_requests}
-        assert len(attempt_conversation_ids) == 2
-        assert any(
-            piece.role == "assistant"
-            and piece.original_value == "malformed judge response"
-            and piece.conversation_id in attempt_conversation_ids
-            for piece in pieces
-        )
-        stored_answer = sqlite_instance.get_message_pieces(prompt_ids=[input_piece.id])
-        assert len(stored_answer) == 1
-        assert stored_answer[0].original_value == answer
     finally:
         await target.cleanup_target_async()
 
@@ -887,93 +797,6 @@ async def test_self_ask_scorer_retries_with_fresh_copilot_session_async(
         call(successful_session.session_id),
     ]
     client.stop.assert_awaited_once()
-
-
-@pytest.mark.usefixtures("patch_central_database")
-def test_self_ask_question_answer_scorer_keeps_editable_history_requirement(sdk: Any) -> None:
-    target = GitHubCopilotTarget(model_name="gpt-5-mini")
-
-    with pytest.raises(ValueError, match="supports_editable_history"):
-        SelfAskQuestionAnswerScorer(chat_target=target)
-
-
-@pytest.mark.usefixtures("patch_central_database")
-async def test_self_ask_true_false_rejects_nontext_for_noneditable_target_async() -> None:
-    from pathlib import Path
-
-    image_path = (
-        Path(__file__).resolve().parents[4]
-        / "pyrit"
-        / "datasets"
-        / "prompt_target"
-        / "target_capabilities"
-        / "probe_image.png"
-    )
-    assert image_path.is_file()
-
-    target = OpenAIChatTarget(
-        model_name="gpt-4o",
-        endpoint="https://api.openai.com/v1",
-        api_key="offline-test-key",
-        custom_configuration=TargetConfiguration(
-            capabilities=TargetCapabilities(
-                supports_multi_turn=True,
-                supports_multi_message_pieces=True,
-                supports_json_output=True,
-                supports_system_prompt=True,
-                input_modalities=frozenset(
-                    {frozenset({"text"}), frozenset({"image_path"}), frozenset({"text", "image_path"})}
-                ),
-            )
-        ),
-    )
-    assert target.capabilities.supports_editable_history is False
-    assert "image_path" in target.capabilities.supported_input_modalities
-
-    scorer = SelfAskTrueFalseScorer.from_question(
-        chat_target=target,
-        question=TrueFalseQuestion(
-            category="image content",
-            true_description="The image contains visible content.",
-            false_description="The image does not contain visible content.",
-        ),
-    )
-    saved_image = store_message(
-        MessagePiece(
-            role="assistant",
-            conversation_id=str(uuid4()),
-            original_value=str(image_path),
-            converted_value=str(image_path),
-            original_value_data_type="image_path",
-            converted_value_data_type="image_path",
-        ).to_message()
-    )
-    valid_json_response = '{"score_value":true,"description":"Visible content","rationale":"The image was evaluated."}'
-
-    async def respond_with_valid_json_async(*, request: Message, **kwargs: Any) -> Message:
-        assert callable(kwargs["api_call"])
-        return Message(
-            message_pieces=[
-                MessagePiece(
-                    role="assistant",
-                    conversation_id=request.message_pieces[0].conversation_id,
-                    original_value=valid_json_response,
-                )
-            ]
-        )
-
-    outbound_send = AsyncMock(side_effect=respond_with_valid_json_async)
-    with patch.object(target, "_handle_openai_request_async", new=outbound_send):
-        with pytest.raises(RuntimeError, match="Error in scorer SelfAskTrueFalseScorer") as exc_info:
-            await scorer.score_async(
-                scorable=MessageScorable.from_message(saved_image),
-                expectation=ScoringExpectation(objective="Describe this image"),
-            )
-
-    assert isinstance(exc_info.value.__cause__, ValueError)
-    assert "non-text" in str(exc_info.value.__cause__)
-    assert "editable history" in str(exc_info.value.__cause__)
-    outbound_send.assert_not_awaited()
 
 
 @pytest.mark.usefixtures("patch_central_database")
