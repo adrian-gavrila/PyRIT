@@ -102,12 +102,10 @@ class GitHubCopilotTarget(PromptTarget):
         self._client: CopilotClient | None = None
         self._runtime_status: GetStatusResponse | None = None
         self._client_start_lock = asyncio.Lock()
-        self._lifecycle_lock = asyncio.Lock()
+        self._lifecycle_condition = asyncio.Condition()
         self._cleanup_task: asyncio.Task[None] | None = None
         self._conversations: dict[str, _ConversationState] = {}
         self._active_target_operations = 0
-        self._active_operations_drained = asyncio.Event()
-        self._active_operations_drained.set()
 
     def _build_identifier(self) -> ComponentIdentifier:
         """
@@ -138,17 +136,16 @@ class GitHubCopilotTarget(PromptTarget):
     @limit_requests_per_minute
     async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
         self.get_identifier()
-        async with self._lifecycle_lock:
+        async with self._lifecycle_condition:
             if self._cleanup_task is not None:
                 raise RuntimeError("GitHubCopilotTarget has been cleaned up and cannot send more prompts.")
             self._active_target_operations += 1
-            self._active_operations_drained.clear()
         try:
             request = normalized_conversation[-1].get_piece()
             conversation_id = request.conversation_id or ""
             conversation = self._conversations.setdefault(conversation_id, _ConversationState())
             async with conversation.lock:
-                async with self._lifecycle_lock:
+                async with self._lifecycle_condition:
                     if self._cleanup_task is not None:
                         raise RuntimeError("GitHubCopilotTarget has been cleaned up and cannot send more prompts.")
                 initial_system_prompt: str | None = None
@@ -166,18 +163,19 @@ class GitHubCopilotTarget(PromptTarget):
                         prompt=request.converted_value,
                     )
                 except BaseException:
-                    await asyncio.shield(
-                        self._retire_conversation_async(
-                            conversation=conversation,
-                        )
-                    )
+                    retirement_task = asyncio.create_task(self._retire_conversation_async(conversation=conversation))
+                    try:
+                        await asyncio.shield(retirement_task)
+                    except asyncio.CancelledError:
+                        await retirement_task
+                        raise
                     raise
             return [construct_response_from_request(request=request, response_text_pieces=[reply_text])]
         finally:
-            async with self._lifecycle_lock:
+            async with self._lifecycle_condition:
                 self._active_target_operations -= 1
                 if self._active_target_operations == 0:
-                    self._active_operations_drained.set()
+                    self._lifecycle_condition.notify_all()
 
     async def _send_text_async(self, *, session: "CopilotSession", prompt: str) -> str:
         from copilot.generated.session_events import (
@@ -228,7 +226,7 @@ class GitHubCopilotTarget(PromptTarget):
         Cleanup is terminal and idempotent. Retained sessions are preserved while the shared
         client is always stopped. Cleanup attempts every owned resource before surfacing failures.
         """
-        async with self._lifecycle_lock:
+        async with self._lifecycle_condition:
             if self._cleanup_task is None:
                 self._cleanup_task = asyncio.create_task(self._cleanup_owned_resources_async())
             cleanup_task = self._cleanup_task
@@ -245,14 +243,13 @@ class GitHubCopilotTarget(PromptTarget):
         Args:
             conversation_id (str): The PyRIT conversation ID to release.
         """
-        async with self._lifecycle_lock:
+        async with self._lifecycle_condition:
             conversation = self._conversations.get(conversation_id)
             if conversation is None or (conversation.retired and conversation.session is None):
                 return
             cleanup_task = self._cleanup_task
             if cleanup_task is None:
                 self._active_target_operations += 1
-                self._active_operations_drained.clear()
 
         if cleanup_task is not None:
             await asyncio.shield(cleanup_task)
@@ -262,10 +259,10 @@ class GitHubCopilotTarget(PromptTarget):
             async with conversation.lock:
                 await self._retire_conversation_async(conversation=conversation)
         finally:
-            async with self._lifecycle_lock:
+            async with self._lifecycle_condition:
                 self._active_target_operations -= 1
                 if self._active_target_operations == 0:
-                    self._active_operations_drained.set()
+                    self._lifecycle_condition.notify_all()
 
     async def _get_or_create_session_async(
         self,
@@ -273,7 +270,7 @@ class GitHubCopilotTarget(PromptTarget):
         conversation_id: str,
         initial_system_prompt: str | None,
     ) -> "CopilotSession":
-        async with self._lifecycle_lock:
+        async with self._lifecycle_condition:
             conversation = self._conversations[conversation_id]
             if conversation.retired:
                 raise RuntimeError(
@@ -329,7 +326,7 @@ class GitHubCopilotTarget(PromptTarget):
                 enable_session_store=False,
                 enable_file_hooks=False,
             )
-            async with self._lifecycle_lock:
+            async with self._lifecycle_condition:
                 conversation.session = session
             return session
         except BaseException:
@@ -361,12 +358,12 @@ class GitHubCopilotTarget(PromptTarget):
                     ) from error
                 raise
 
-            async with self._lifecycle_lock:
+            async with self._lifecycle_condition:
                 self._client = client
             return client
 
     async def _retire_conversation_async(self, *, conversation: _ConversationState) -> None:
-        async with self._lifecycle_lock:
+        async with self._lifecycle_condition:
             session = conversation.session
             client = self._client
             if session is None or client is None:
@@ -397,13 +394,14 @@ class GitHubCopilotTarget(PromptTarget):
             logger.info("Retaining Copilot session %s as requested; delete it manually.", session_id)
         else:
             await client.delete_session(session_id)
-        async with self._lifecycle_lock:
+        async with self._lifecycle_condition:
             if conversation.session is session:
                 conversation.session = None
+                conversation.retired = True
 
     async def _cleanup_owned_resources_async(self) -> None:
-        await self._active_operations_drained.wait()
-        async with self._lifecycle_lock:
+        async with self._lifecycle_condition:
+            await self._lifecycle_condition.wait_for(lambda: self._active_target_operations == 0)
             conversations = [
                 conversation for conversation in self._conversations.values() if conversation.session is not None
             ]

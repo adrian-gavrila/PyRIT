@@ -11,9 +11,10 @@ from pydantic import BaseModel, ConfigDict, field_validator
 from pyrit.common import verify_and_resolve_path
 from pyrit.common.path import SCORER_SEED_PROMPT_PATH
 from pyrit.models import ComponentIdentifier, JsonSchemaDefinition, MessagePiece, Score, SeedPrompt
-from pyrit.prompt_target import CHAT_TARGET_REQUIREMENTS, PromptTarget
+from pyrit.prompt_target import PromptTarget
 from pyrit.score.llm_scoring import _run_llm_scoring_async
 from pyrit.score.response_handler import JsonSchemaResponseHandler, ResponseHandler, TrueFalseResponseHandler
+from pyrit.score.scorer import _SelfContainedJudgeTargetRequirements
 from pyrit.score.scorer_prompt_validator import ScorerPromptValidator
 from pyrit.score.system_prompt import _render_system_prompt_template
 from pyrit.score.true_false.true_false_score_aggregator import (
@@ -143,7 +144,7 @@ class SelfAskTrueFalseScorer(MessageTrueFalseScorer):
     _DEFAULT_VALIDATOR: ScorerPromptValidator = ScorerPromptValidator(
         supported_data_types=["text", "image_path"],
     )
-    TARGET_REQUIREMENTS = CHAT_TARGET_REQUIREMENTS
+    TARGET_REQUIREMENTS = _SelfContainedJudgeTargetRequirements()
 
     def __init__(
         self,
@@ -159,8 +160,9 @@ class SelfAskTrueFalseScorer(MessageTrueFalseScorer):
         Initialize the SelfAskTrueFalseScorer.
 
         Args:
-            chat_target (PromptTarget | None): The chat target used for scoring. Must satisfy
-                CHAT_TARGET_REQUIREMENTS.
+            chat_target (PromptTarget | None): The chat target used for scoring. Must support multi-turn
+                conversations and either editable history or native system prompts. Noneditable targets
+                are supported for text scoring only.
             system_prompt (SeedPrompt | str | None): The scoring system prompt. A ``SeedPrompt``
                 (e.g. rendered via ``render_true_false_system_prompt``) is used verbatim and may
                 carry a ``response_json_schema``; a ``str`` is used as-is; ``None`` falls back to the
@@ -295,9 +297,17 @@ class SelfAskTrueFalseScorer(MessageTrueFalseScorer):
                 The category is configured from the TrueFalseQuestionPath.
                 The score_value is True or False based on which description fits best.
                 Metadata can be configured to provide additional information.
+
+        Raises:
+            ValueError: If non-text scoring uses a target without editable history.
         """
         # Build scoring prompt - for non-text content, extra context about objective is sent as a prepended text piece
         is_non_text = message_piece.converted_value_data_type != "text"
+        if is_non_text and not self._prompt_target.capabilities.supports_editable_history:
+            raise ValueError(
+                "non-text scoring requires editable history; fresh-conversation retries support text only."
+            )
+
         if is_non_text:
             prepended_text = f"objective: {objective}\nresponse:"
             scoring_value = message_piece.converted_value
@@ -318,6 +328,9 @@ class SelfAskTrueFalseScorer(MessageTrueFalseScorer):
             prepended_text=prepended_text,
             category=self._score_category,
             objective=objective,
+            fresh_conversation_per_attempt=(
+                scoring_data_type == "text" and not self._prompt_target.capabilities.supports_editable_history
+            ),
         )
 
         score = unvalidated_score.to_score(score_value=unvalidated_score.raw_score_value, score_type="true_false")
