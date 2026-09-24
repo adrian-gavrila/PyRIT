@@ -620,6 +620,98 @@ async def test_repeated_reset_does_not_join_unrelated_cleanup_async(
 
 
 @pytest.mark.usefixtures("patch_central_database")
+@pytest.mark.parametrize(
+    "failed_conversation",
+    [
+        pytest.param("conversation-a", id="selected-session-release-fails"),
+        pytest.param("conversation-b", id="unrelated-session-release-fails"),
+    ],
+)
+async def test_reset_during_cleanup_propagates_only_selected_session_failure_async(
+    *,
+    sdk: Any,
+    client: NonCallableMagicMock,
+    failed_conversation: str,
+) -> None:
+    session_a = _make_sdk_session(sdk=sdk, session_id="sdk-session-a")
+    session_a.send_and_wait.return_value = _assistant_reply("A")
+    session_b = _make_sdk_session(sdk=sdk, session_id="sdk-session-b")
+    session_b.send_and_wait.return_value = _assistant_reply("B")
+    client.create_session.side_effect = [session_a, session_b]
+    target = GitHubCopilotTarget(model_name="gpt-5-mini", retain_session=True)
+
+    for conversation_id, prompt in (("conversation-a", "A"), ("conversation-b", "B")):
+        await target.send_prompt_async(
+            message=_user_message(conversation_id=conversation_id, original_value=prompt),
+        )
+
+    a_release_started = asyncio.Event()
+    release_a = asyncio.Event()
+    a_release_finished = asyncio.Event()
+    b_release_started = asyncio.Event()
+    release_b = asyncio.Event()
+    a_failure = RuntimeError("selected session A release failed")
+    b_failure = RuntimeError("unrelated session B release failed")
+
+    async def disconnect_a_async() -> None:
+        a_release_started.set()
+        try:
+            await release_a.wait()
+            if failed_conversation == "conversation-a":
+                raise a_failure
+        finally:
+            a_release_finished.set()
+
+    async def disconnect_b_async() -> None:
+        b_release_started.set()
+        await release_b.wait()
+        if failed_conversation == "conversation-b":
+            raise b_failure
+
+    session_a.disconnect.side_effect = disconnect_a_async
+    session_b.disconnect.side_effect = disconnect_b_async
+    cleanup_task = asyncio.create_task(target.cleanup_target_async())
+    reset_task: asyncio.Task[None] | None = None
+    try:
+        await asyncio.wait_for(a_release_started.wait(), timeout=2.0)
+        reset_task = asyncio.create_task(target.reset_conversation_async(conversation_id="conversation-a"))
+        await asyncio.sleep(0)
+        assert not reset_task.done()
+
+        release_a.set()
+        await asyncio.wait_for(a_release_finished.wait(), timeout=2.0)
+        await asyncio.wait_for(b_release_started.wait(), timeout=2.0)
+        assert a_release_finished.is_set()
+        release_b.set()
+
+        expected_cleanup_failure = a_failure if failed_conversation == "conversation-a" else b_failure
+        with pytest.raises(RuntimeError) as cleanup_error:
+            await asyncio.wait_for(cleanup_task, timeout=2.0)
+        assert cleanup_error.value is expected_cleanup_failure
+
+        if failed_conversation == "conversation-a":
+            with pytest.raises(RuntimeError) as reset_error:
+                await asyncio.wait_for(reset_task, timeout=2.0)
+            assert reset_error.value is a_failure
+        else:
+            await asyncio.wait_for(reset_task, timeout=2.0)
+
+        assert client.create_session.await_count == 2
+        session_a.send_and_wait.assert_awaited_once()
+        session_b.send_and_wait.assert_awaited_once()
+        session_a.disconnect.assert_awaited_once()
+        session_b.disconnect.assert_awaited_once()
+        client.stop.assert_awaited_once()
+    finally:
+        release_a.set()
+        release_b.set()
+        tasks = {cleanup_task}
+        if reset_task is not None:
+            tasks.add(reset_task)
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.usefixtures("patch_central_database")
 async def test_normalizer_rejects_retired_conversation_but_allows_fresh_async(
     *,
     sdk: Any,

@@ -242,6 +242,9 @@ class GitHubCopilotTarget(PromptTarget):
 
         Args:
             conversation_id (str): The PyRIT conversation ID to release.
+
+        Raises:
+            asyncio.CancelledError: If the caller is cancelled while waiting for cleanup.
         """
         async with self._lifecycle_condition:
             conversation = self._conversations.get(conversation_id)
@@ -252,7 +255,15 @@ class GitHubCopilotTarget(PromptTarget):
                 self._active_target_operations += 1
 
         if cleanup_task is not None:
-            await asyncio.shield(cleanup_task)
+            try:
+                await asyncio.shield(cleanup_task)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                async with self._lifecycle_condition:
+                    selected_conversation_released = conversation.retired and conversation.session is None
+                if not selected_conversation_released:
+                    raise
             return
 
         try:
