@@ -717,8 +717,8 @@ async def test_fresh_judgment_release_controls_observation_persistence_async(
 ) -> None:
     target = _make_mock_judge_target()
     valid_reply = '{"score_value":"False","description":"Not a refusal","rationale":"The response is not a refusal."}'
-    malformed_reply = BAD_JSON
-    blocked_reply = "blocked response"
+    reply_text = {"valid": valid_reply, "malformed": BAD_JSON, "blocked": "blocked response"}[reply_kind]
+    reply_data_type: PromptDataType = "error" if reply_kind == "blocked" else "text"
     release_failure = RuntimeError("native session release failed")
     sent_conversation_ids: list[str] = []
     request_piece_ids: list[uuid.UUID] = []
@@ -731,23 +731,15 @@ async def test_fresh_judgment_release_controls_observation_persistence_async(
         assert conversation_id is not None
         sent_conversation_ids.append(conversation_id)
         request_piece_ids.append(request.id)
-        if reply_kind == "blocked":
-            response_piece = MessagePiece(
-                role="assistant",
-                original_value=blocked_reply,
-                original_value_data_type="error",
-                converted_value=blocked_reply,
-                converted_value_data_type="error",
-                conversation_id=conversation_id,
-                response_error="blocked",
-            )
-        else:
-            response_text = valid_reply if reply_kind == "valid" else malformed_reply
-            response_piece = MessagePiece(
-                role="assistant",
-                original_value=response_text,
-                conversation_id=conversation_id,
-            )
+        response_piece = MessagePiece(
+            role="assistant",
+            original_value=reply_text,
+            original_value_data_type=reply_data_type,
+            converted_value=reply_text,
+            converted_value_data_type=reply_data_type,
+            conversation_id=conversation_id,
+            response_error="blocked" if reply_kind == "blocked" else "none",
+        )
         response_piece_ids.append(response_piece.id)
         return [response_piece.to_message()]
 
@@ -824,24 +816,11 @@ async def test_fresh_judgment_release_controls_observation_persistence_async(
         assert stored_response.id == response_piece_ids[0]
         assert stored_response.role == "assistant"
         assert stored_response.conversation_id == sent_conversation_ids[0]
-        if reply_kind == "blocked":
-            assert stored_response.original_value == blocked_reply
-            assert stored_response.original_value_data_type == "error"
-            assert stored_response.converted_value == blocked_reply
-            assert stored_response.converted_value_data_type == "error"
-            assert stored_response.response_error == "blocked"
-        elif reply_kind == "valid":
-            assert stored_response.original_value == valid_reply
-            assert stored_response.original_value_data_type == "text"
-            assert stored_response.converted_value == valid_reply
-            assert stored_response.converted_value_data_type == "text"
-            assert stored_response.response_error == "none"
-        else:
-            assert stored_response.original_value == malformed_reply
-            assert stored_response.original_value_data_type == "text"
-            assert stored_response.converted_value == malformed_reply
-            assert stored_response.converted_value_data_type == "text"
-            assert stored_response.response_error == "none"
+        assert stored_response.original_value == reply_text
+        assert stored_response.original_value_data_type == reply_data_type
+        assert stored_response.converted_value == reply_text
+        assert stored_response.converted_value_data_type == reply_data_type
+        assert stored_response.response_error == ("blocked" if reply_kind == "blocked" else "none")
 
 
 async def test_scorer_send_chat_target_async_good_response(good_json, patch_central_database):
