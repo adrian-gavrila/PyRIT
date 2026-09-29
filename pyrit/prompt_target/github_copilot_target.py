@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
+from pyrit.common import get_non_required_value
+from pyrit.exceptions import EmptyResponseException
 from pyrit.models import ComponentIdentifier, Message, construct_response_from_request
 from pyrit.prompt_target.common.prompt_target import PromptTarget
 from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
@@ -25,6 +27,7 @@ if TYPE_CHECKING:
 class _ConversationState:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     session: "CopilotSession | None" = None
+    pending_session_id: str | None = None
     retired: bool = False
 
 
@@ -54,8 +57,8 @@ class GitHubCopilotTarget(PromptTarget):
 
         Args:
             model_name (str): Explicit Copilot model ID.
-            github_token (str | None): Nonblank GitHub token, forwarded unchanged with precedence over other
-                authentication methods. Defaults to None for SDK environment-token and saved-login discovery.
+            github_token (str | None): Explicit nonblank token takes precedence over ``GITHUB_TOKEN``;
+                otherwise uses that environment variable or SDK login discovery.
             working_directory (str | Path | None): Existing local directory; no Git repository is required.
                 Supplied paths are resolved once against the current directory at construction and included
                 in saved target identifiers. Defaults to None for the SDK's current directory at each client start.
@@ -79,6 +82,7 @@ class GitHubCopilotTarget(PromptTarget):
             raise ValueError("github_token must not be blank when supplied.")
         if not math.isfinite(response_timeout_seconds) or response_timeout_seconds <= 0:
             raise ValueError("response_timeout_seconds must be a finite positive number.")
+        resolved_github_token = get_non_required_value(env_var_name="GITHUB_TOKEN", passed_value=github_token) or None
 
         self._working_directory: str | None = None
         if working_directory is not None:
@@ -96,7 +100,7 @@ class GitHubCopilotTarget(PromptTarget):
 
         super().__init__(model_name=model_name, max_requests_per_minute=max_requests_per_minute)
         self._sdk = copilot
-        self._github_token = github_token
+        self._github_token = resolved_github_token
         self._retain_session = retain_session
         self._response_timeout_seconds = response_timeout_seconds
         self._client: CopilotClient | None = None
@@ -142,7 +146,9 @@ class GitHubCopilotTarget(PromptTarget):
             self._active_target_operations += 1
         try:
             request = normalized_conversation[-1].get_piece()
-            conversation_id = request.conversation_id or ""
+            conversation_id = request.conversation_id
+            if not conversation_id:
+                raise ValueError("GitHubCopilotTarget requires a nonempty conversation_id.")
             conversation = self._conversations.setdefault(conversation_id, _ConversationState())
             async with conversation.lock:
                 async with self._lifecycle_condition:
@@ -162,12 +168,19 @@ class GitHubCopilotTarget(PromptTarget):
                         session=session,
                         prompt=request.converted_value,
                     )
-                except BaseException:
+                except BaseException as send_error:
                     retirement_task = asyncio.create_task(self._retire_conversation_async(conversation=conversation))
                     try:
                         await asyncio.shield(retirement_task)
-                    except asyncio.CancelledError:
-                        await retirement_task
+                    except asyncio.CancelledError as cancellation:
+                        try:
+                            await retirement_task
+                        except BaseException as cleanup_error:
+                            raise cancellation from cleanup_error
+                        raise
+                    except BaseException as cleanup_error:
+                        if isinstance(send_error, asyncio.CancelledError):
+                            raise send_error from cleanup_error
                         raise
                     raise
             return [construct_response_from_request(request=request, response_text_pieces=[reply_text])]
@@ -209,14 +222,16 @@ class GitHubCopilotTarget(PromptTarget):
             raise RuntimeError("Copilot turn was aborted.")
         if tool_execution_started:
             raise RuntimeError("Copilot turn reported tool execution.")
+        if reply is None:
+            raise EmptyResponseException(message="Copilot did not return a root assistant reply.")
         if (
-            reply is None
-            or reply.agent_id is not None
+            reply.agent_id is not None
             or not isinstance(reply.data, AssistantMessageData)
             or not isinstance(reply.data.content, str)
-            or not reply.data.content
         ):
-            raise ValueError("Copilot did not return a non-empty root assistant text reply.")
+            raise ValueError("Copilot did not return a root assistant text reply.")
+        if not reply.data.content:
+            raise EmptyResponseException(message="Copilot returned an empty root assistant reply.")
         return reply.data.content
 
     async def cleanup_target_async(self) -> None:
@@ -248,7 +263,9 @@ class GitHubCopilotTarget(PromptTarget):
         """
         async with self._lifecycle_condition:
             conversation = self._conversations.get(conversation_id)
-            if conversation is None or (conversation.retired and conversation.session is None):
+            if conversation is None or (
+                conversation.retired and conversation.session is None and conversation.pending_session_id is None
+            ):
                 return
             cleanup_task = self._cleanup_task
             if cleanup_task is None:
@@ -257,13 +274,22 @@ class GitHubCopilotTarget(PromptTarget):
         if cleanup_task is not None:
             try:
                 await asyncio.shield(cleanup_task)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                async with self._lifecycle_condition:
-                    selected_conversation_released = conversation.retired and conversation.session is None
-                if not selected_conversation_released:
+            except asyncio.CancelledError as error:
+                current_task = asyncio.current_task()
+                if current_task is not None and current_task.cancelling():
                     raise
+                cleanup_error = error
+            except (Exception, BaseExceptionGroup) as error:
+                cleanup_error = error
+            else:
+                return
+
+            async with self._lifecycle_condition:
+                selected_conversation_released = (
+                    conversation.retired and conversation.session is None and conversation.pending_session_id is None
+                )
+            if not selected_conversation_released:
+                raise cleanup_error
             return
 
         try:
@@ -320,6 +346,8 @@ class GitHubCopilotTarget(PromptTarget):
                 }
             else:
                 system_message = {"mode": "replace", "content": initial_system_prompt}
+            async with self._lifecycle_condition:
+                conversation.pending_session_id = session_id
             session = await client.create_session(
                 session_id=session_id,
                 model=self._model_name,
@@ -339,9 +367,20 @@ class GitHubCopilotTarget(PromptTarget):
             )
             async with self._lifecycle_condition:
                 conversation.session = session
+                conversation.pending_session_id = None
             return session
-        except BaseException:
-            await self._cleanup_allocated_session_async(client=client, session_id=session_id)
+        except BaseException as creation_error:
+            try:
+                await self._cleanup_allocated_session_async(client=client, session_id=session_id)
+            except BaseException as cleanup_error:
+                async with self._lifecycle_condition:
+                    conversation.retired = True
+                if isinstance(creation_error, asyncio.CancelledError):
+                    raise creation_error from cleanup_error
+                raise
+            async with self._lifecycle_condition:
+                if conversation.pending_session_id == session_id:
+                    conversation.pending_session_id = None
             raise
 
     async def _get_or_start_client_async(self) -> "CopilotClient":
@@ -377,7 +416,7 @@ class GitHubCopilotTarget(PromptTarget):
         async with self._lifecycle_condition:
             session = conversation.session
             client = self._client
-            if session is None or client is None:
+            if client is None or (session is None and conversation.pending_session_id is None):
                 return
             conversation.retired = True
         await self._release_session_async(client=client, conversation=conversation)
@@ -398,6 +437,15 @@ class GitHubCopilotTarget(PromptTarget):
     ) -> None:
         session = conversation.session
         if session is None:
+            pending_session_id = conversation.pending_session_id
+            if pending_session_id is None:
+                return
+            async with self._lifecycle_condition:
+                conversation.retired = True
+            await self._cleanup_allocated_session_async(client=client, session_id=pending_session_id)
+            async with self._lifecycle_condition:
+                if conversation.pending_session_id == pending_session_id:
+                    conversation.pending_session_id = None
             return
         session_id = session.session_id
         if self._retain_session:
@@ -414,7 +462,9 @@ class GitHubCopilotTarget(PromptTarget):
         async with self._lifecycle_condition:
             await self._lifecycle_condition.wait_for(lambda: self._active_target_operations == 0)
             conversations = [
-                conversation for conversation in self._conversations.values() if conversation.session is not None
+                conversation
+                for conversation in self._conversations.values()
+                if conversation.session is not None or conversation.pending_session_id is not None
             ]
             client = self._client
             self._client = None

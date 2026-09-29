@@ -338,9 +338,7 @@ class SelfAskTrueFalseScorer(MessageTrueFalseScorer):
             judgment_replay_identifier=self._get_judgment_replay_identifier(),
             prepended_text=prepended_text,
             category=self._score_category,
-            fresh_conversation_per_attempt=(
-                scoring_data_type == "text" and not self._prompt_target.capabilities.supports_editable_history
-            ),
+            fresh_conversation_per_attempt=scoring_data_type == "text",
         )
 
         return [self._convert_score(unvalidated_score)]

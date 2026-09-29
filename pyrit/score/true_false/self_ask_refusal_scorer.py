@@ -250,7 +250,7 @@ class SelfAskRefusalScorer(MessageTrueFalseScorer):
             scorer_identifier=self.get_identifier(),
             judgment_replay_identifier=self._get_judgment_replay_identifier(),
             category=self._score_category,
-            fresh_conversation_per_attempt=not self._prompt_target.capabilities.supports_editable_history,
+            fresh_conversation_per_attempt=True,
         )
         score = unvalidated_score.to_score(score_value=unvalidated_score.raw_score_value, score_type="true_false")
 

@@ -48,7 +48,10 @@ def client(sdk: Any) -> Iterator[NonCallableMagicMock]:
     assert isinstance(client, NonCallableMagicMock)
     client.create_session.return_value = session
     client.get_status.return_value = GetStatusResponse(version="6.5.4", protocol_version=3)
-    with patch.object(sdk, "CopilotClient", return_value=client):
+    with (
+        patch.object(sdk, "CopilotClient", return_value=client),
+        patch.dict("os.environ", {"GITHUB_TOKEN": ""}),
+    ):
         yield client
 
 
@@ -621,17 +624,31 @@ async def test_repeated_reset_does_not_join_unrelated_cleanup_async(
 
 @pytest.mark.usefixtures("patch_central_database")
 @pytest.mark.parametrize(
-    "failed_conversation",
+    ("failed_conversation", "failure_kind"),
     [
-        pytest.param("conversation-a", id="selected-session-release-fails"),
-        pytest.param("conversation-b", id="unrelated-session-release-fails"),
+        pytest.param("conversation-a", "error", id="selected-session-release-fails"),
+        pytest.param("conversation-b", "error", id="unrelated-session-release-fails"),
+        pytest.param("conversation-a", "release-cancel", id="selected-session-release-cancelled"),
+        pytest.param("conversation-b", "release-cancel", id="unrelated-session-release-cancelled"),
+        pytest.param(None, "caller-cancel", id="reset-caller-cancelled"),
+        pytest.param(
+            "conversation-a",
+            "release-cancel-stop-error",
+            id="selected-release-cancelled-stop-fails",
+        ),
+        pytest.param(
+            "conversation-b",
+            "release-cancel-stop-error",
+            id="unrelated-release-cancelled-stop-fails",
+        ),
     ],
 )
 async def test_reset_during_cleanup_propagates_only_selected_session_failure_async(
     *,
     sdk: Any,
     client: NonCallableMagicMock,
-    failed_conversation: str,
+    failed_conversation: str | None,
+    failure_kind: str,
 ) -> None:
     session_a = _make_sdk_session(sdk=sdk, session_id="sdk-session-a")
     session_a.send_and_wait.return_value = _assistant_reply("A")
@@ -652,13 +669,21 @@ async def test_reset_during_cleanup_propagates_only_selected_session_failure_asy
     release_b = asyncio.Event()
     a_failure = RuntimeError("selected session A release failed")
     b_failure = RuntimeError("unrelated session B release failed")
+    selected_cancellation = asyncio.CancelledError("selected session A release cancelled")
+    unrelated_cancellation = asyncio.CancelledError("unrelated session B release cancelled")
+    stop_failure = RuntimeError("client stop failed")
+    if failure_kind == "release-cancel-stop-error":
+        client.stop.side_effect = stop_failure
 
     async def disconnect_a_async() -> None:
         a_release_started.set()
         try:
             await release_a.wait()
             if failed_conversation == "conversation-a":
-                raise a_failure
+                if failure_kind == "error":
+                    raise a_failure
+                if failure_kind in ("release-cancel", "release-cancel-stop-error"):
+                    raise selected_cancellation
         finally:
             a_release_finished.set()
 
@@ -666,7 +691,10 @@ async def test_reset_during_cleanup_propagates_only_selected_session_failure_asy
         b_release_started.set()
         await release_b.wait()
         if failed_conversation == "conversation-b":
-            raise b_failure
+            if failure_kind == "error":
+                raise b_failure
+            if failure_kind in ("release-cancel", "release-cancel-stop-error"):
+                raise unrelated_cancellation
 
     session_a.disconnect.side_effect = disconnect_a_async
     session_b.disconnect.side_effect = disconnect_b_async
@@ -682,19 +710,52 @@ async def test_reset_during_cleanup_propagates_only_selected_session_failure_asy
         await asyncio.wait_for(a_release_finished.wait(), timeout=2.0)
         await asyncio.wait_for(b_release_started.wait(), timeout=2.0)
         assert a_release_finished.is_set()
-        release_b.set()
 
-        expected_cleanup_failure = a_failure if failed_conversation == "conversation-a" else b_failure
-        with pytest.raises(RuntimeError) as cleanup_error:
-            await asyncio.wait_for(cleanup_task, timeout=2.0)
-        assert cleanup_error.value is expected_cleanup_failure
-
-        if failed_conversation == "conversation-a":
-            with pytest.raises(RuntimeError) as reset_error:
+        if failure_kind == "caller-cancel":
+            reset_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
                 await asyncio.wait_for(reset_task, timeout=2.0)
-            assert reset_error.value is a_failure
+            assert reset_task.cancelled()
+            assert not cleanup_task.done()
+            client.stop.assert_not_awaited()
+            release_b.set()
+            await asyncio.wait_for(cleanup_task, timeout=2.0)
         else:
-            await asyncio.wait_for(reset_task, timeout=2.0)
+            release_b.set()
+            if failure_kind == "error":
+                expected_cleanup_failure = a_failure if failed_conversation == "conversation-a" else b_failure
+                with pytest.raises(RuntimeError) as cleanup_error:
+                    await asyncio.wait_for(cleanup_task, timeout=2.0)
+                assert cleanup_error.value is expected_cleanup_failure
+                if failed_conversation == "conversation-a":
+                    with pytest.raises(RuntimeError) as reset_error:
+                        await asyncio.wait_for(reset_task, timeout=2.0)
+                    assert reset_error.value is a_failure
+                else:
+                    await asyncio.wait_for(reset_task, timeout=2.0)
+            elif failure_kind == "release-cancel-stop-error":
+                with pytest.raises(BaseExceptionGroup) as cleanup_error:
+                    await asyncio.wait_for(cleanup_task, timeout=2.0)
+                expected_release_failure = (
+                    selected_cancellation if failed_conversation == "conversation-a" else unrelated_cancellation
+                )
+                assert len(cleanup_error.value.exceptions) == 2
+                assert cleanup_error.value.exceptions[0] is expected_release_failure
+                assert cleanup_error.value.exceptions[1] is stop_failure
+                if failed_conversation == "conversation-a":
+                    with pytest.raises(BaseExceptionGroup) as reset_error:
+                        await asyncio.wait_for(reset_task, timeout=2.0)
+                    assert reset_error.value is cleanup_error.value
+                else:
+                    await asyncio.wait_for(reset_task, timeout=2.0)
+            else:
+                with pytest.raises(asyncio.CancelledError):
+                    await asyncio.wait_for(cleanup_task, timeout=2.0)
+                if failed_conversation == "conversation-a":
+                    with pytest.raises(asyncio.CancelledError):
+                        await asyncio.wait_for(reset_task, timeout=2.0)
+                else:
+                    await asyncio.wait_for(reset_task, timeout=2.0)
 
         assert client.create_session.await_count == 2
         session_a.send_and_wait.assert_awaited_once()
@@ -783,13 +844,26 @@ async def test_normalizer_rejects_retired_conversation_but_allows_fresh_async(
 
 
 @pytest.mark.usefixtures("patch_central_database")
-async def test_self_ask_true_false_uses_fresh_copilot_session_after_invalid_json_async(
+@pytest.mark.parametrize(
+    "initial_reply",
+    [
+        pytest.param("malformed", id="malformed-json"),
+        pytest.param("empty", id="empty-root"),
+        pytest.param("absent", id="absent-root"),
+    ],
+)
+async def test_self_ask_true_false_uses_fresh_copilot_session_after_unusable_reply_async(
     *,
     sdk: Any,
     client: NonCallableMagicMock,
+    initial_reply: str,
 ) -> None:
     failed_session = _make_sdk_session(sdk=sdk, session_id="malformed-judge-session")
-    failed_session.send_and_wait.return_value = _assistant_reply("malformed judge response")
+    failed_session.send_and_wait.return_value = {
+        "malformed": _assistant_reply("malformed judge response"),
+        "empty": _assistant_reply(""),
+        "absent": None,
+    }[initial_reply]
     successful_session = _make_sdk_session(sdk=sdk, session_id="valid-judge-session")
     released_session_ids: list[str] = []
     judge_json = '{"score_value":true,"description":"Correct","rationale":"Paris is the capital of France."}'
@@ -852,12 +926,18 @@ async def test_self_ask_true_false_uses_fresh_copilot_session_after_invalid_json
 
 
 @pytest.mark.usefixtures("patch_central_database")
+@pytest.mark.parametrize(
+    "release_fails",
+    [pytest.param(False, id="release-success"), pytest.param(True, id="release-failure")],
+)
 async def test_cancelled_send_keeps_retirement_owned_until_cleanup_async(
     *,
     client: NonCallableMagicMock,
+    release_fails: bool,
 ) -> None:
     session = client.create_session.return_value
     session.send_and_wait.side_effect = TimeoutError("ambiguous mock send")
+    release_error = RuntimeError("Synthetic session release failure")
     delete_started = asyncio.Event()
     release_delete = asyncio.Event()
     delete_tasks: list[asyncio.Task[Any]] = []
@@ -872,6 +952,8 @@ async def test_cancelled_send_keeps_retirement_owned_until_cleanup_async(
         if delete_count == 1:
             delete_started.set()
         await release_delete.wait()
+        if delete_count == 1 and release_fails:
+            raise release_error
 
     client.delete_session.side_effect = delete_session_async
     target = GitHubCopilotTarget(model_name="gpt-5-mini")
@@ -902,10 +984,15 @@ async def test_cancelled_send_keeps_retirement_owned_until_cleanup_async(
         client.stop.assert_not_awaited()
 
         release_delete.set()
-        with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(asyncio.shield(send_task), timeout=2.0)
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await asyncio.wait_for(send_task, timeout=2.0)
+        if release_fails:
+            assert exc_info.value.__cause__ is release_error
         await asyncio.wait_for(cleanup_task, timeout=2.0)
-        client.delete_session.assert_awaited_once_with(session.session_id)
+        expected_delete_calls = (
+            [call(session.session_id), call(session.session_id)] if release_fails else [call(session.session_id)]
+        )
+        assert client.delete_session.await_args_list == expected_delete_calls
         client.stop.assert_awaited_once()
         assert all(task.done() for task in delete_tasks)
     finally:
@@ -914,6 +1001,50 @@ async def test_cancelled_send_keeps_retirement_owned_until_cleanup_async(
         if cleanup_task is not None:
             tasks.add(cleanup_task)
         await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=2.0)
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_cancelled_send_preserves_cancellation_when_retirement_fails_async(
+    *,
+    client: NonCallableMagicMock,
+) -> None:
+    session = client.create_session.return_value
+    send_started = asyncio.Event()
+    wait_for_cancel = asyncio.Event()
+    release_error = RuntimeError("Synthetic session release failure")
+
+    async def send_and_wait_async(*_args: Any, **_kwargs: Any) -> None:
+        send_started.set()
+        await wait_for_cancel.wait()
+
+    session.send_and_wait.side_effect = send_and_wait_async
+    client.delete_session.side_effect = [release_error, None]
+    target = GitHubCopilotTarget(model_name="gpt-5-mini")
+    send_task = asyncio.create_task(
+        target.send_prompt_async(
+            message=_user_message(
+                conversation_id="cancelled-send-release-failure",
+                original_value="cancelled request",
+            )
+        )
+    )
+
+    try:
+        await asyncio.wait_for(send_started.wait(), timeout=2.0)
+        send_task.cancel()
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await asyncio.wait_for(send_task, timeout=2.0)
+        assert exc_info.value.__cause__ is release_error
+        client.delete_session.assert_awaited_once_with(session.session_id)
+    finally:
+        await _cancel_tasks_async(send_task)
+        await target.cleanup_target_async()
+
+    assert client.delete_session.await_args_list == [
+        call(session.session_id),
+        call(session.session_id),
+    ]
+    client.stop.assert_awaited_once()
 
 
 @pytest.mark.usefixtures("patch_central_database")
@@ -1073,6 +1204,32 @@ async def test_direct_send_captures_model_identity_before_startup_async(
 
 
 @pytest.mark.usefixtures("patch_central_database")
+@pytest.mark.parametrize(
+    "conversation_id",
+    [pytest.param(None, id="missing"), pytest.param("", id="empty")],
+)
+async def test_direct_send_requires_nonempty_conversation_id_async(
+    *,
+    sdk: Any,
+    client: NonCallableMagicMock,
+    conversation_id: str | None,
+) -> None:
+    target = GitHubCopilotTarget(model_name="gpt-5-mini")
+
+    with pytest.raises(ValueError, match="conversation_id"):
+        await target.send_prompt_async(
+            message=_user_message(
+                conversation_id=conversation_id,
+                original_value="direct request",
+            )
+        )
+
+    sdk.CopilotClient.assert_not_called()
+    client.start.assert_not_awaited()
+    client.create_session.assert_not_awaited()
+
+
+@pytest.mark.usefixtures("patch_central_database")
 @pytest.mark.parametrize("failure_stage", ["start", "status", "send", "stop"])
 async def test_normalizer_surfaces_lifecycle_failures_async(
     *,
@@ -1184,7 +1341,10 @@ async def test_normalizer_surfaces_dispatch_timeout_and_cleans_up_without_replay
 
 
 @pytest.mark.usefixtures("patch_central_database")
-@pytest.mark.parametrize("invalid_reply", ["empty", "subagent", "absent", "non-assistant"])
+@pytest.mark.parametrize(
+    "invalid_reply",
+    ["empty", "subagent", "empty-subagent", "absent", "non-assistant"],
+)
 async def test_normalizer_rejects_invalid_reply_async(
     *,
     client: NonCallableMagicMock,
@@ -1194,25 +1354,39 @@ async def test_normalizer_rejects_invalid_reply_async(
     from copilot.generated.session_events import SessionEventType, SessionIdleData
 
     reply = _assistant_reply("HELLO")
+    empty_subagent_reply = replace(_assistant_reply(""), agent_id="sdk-subagent-id")
     session = client.create_session.return_value
     session.send_and_wait.return_value = {
         "empty": _assistant_reply(""),
         "subagent": replace(reply, agent_id="sdk-subagent-id"),
+        "empty-subagent": empty_subagent_reply,
         "absent": None,
         "non-assistant": replace(reply, type=SessionEventType.SESSION_IDLE, data=SessionIdleData(aborted=False)),
     }[invalid_reply]
     conversation_id = str(uuid4())
     target = GitHubCopilotTarget(model_name="gpt-5-mini")
-    with pytest.raises(Exception, match="Error sending prompt with conversation ID:") as exc_info:
-        await _send_normalized_async(
+
+    if invalid_reply in {"empty", "absent"}:
+        response = await _send_normalized_async(
             target=target,
             original_value="Reply exactly HELLO.",
             conversation_id=conversation_id,
         )
-    assert isinstance(exc_info.value.__cause__, ValueError)
+        assert response.get_piece().converted_value == ""
+        expected_response_error = "empty"
+    else:
+        with pytest.raises(Exception, match="Error sending prompt with conversation ID:") as exc_info:
+            await _send_normalized_async(
+                target=target,
+                original_value="Reply exactly HELLO.",
+                conversation_id=conversation_id,
+            )
+        assert isinstance(exc_info.value.__cause__, ValueError)
+        expected_response_error = "processing"
+
     assert _message_roles_and_errors(memory=sqlite_instance, conversation_id=conversation_id) == [
         ("user", "none"),
-        ("assistant", "processing"),
+        ("assistant", expected_response_error),
     ]
     session.send_and_wait.assert_awaited_once()
     session.on.return_value.assert_called_once_with()
@@ -1306,27 +1480,40 @@ async def test_normalizer_rejects_unsafe_events_async(
 
 
 @pytest.mark.usefixtures("patch_central_database")
-@pytest.mark.parametrize("retain_session", [False, True], ids=["delete", "retain"])
+@pytest.mark.parametrize(
+    ("retain_session", "retry_surface"),
+    [
+        pytest.param(False, None, id="delete"),
+        pytest.param(True, None, id="retain"),
+        pytest.param(False, "terminal-cleanup", id="terminal-cleanup-retry"),
+        pytest.param(False, "selected-reset", id="selected-reset-retry"),
+    ],
+)
 async def test_normalizer_cleans_up_partial_creation_async(
     *,
     client: NonCallableMagicMock,
     sqlite_instance: MemoryInterface,
     caplog: pytest.LogCaptureFixture,
     retain_session: bool,
+    retry_surface: str | None,
 ) -> None:
     session = client.create_session.return_value
     sessions = {"unrelated-session-id"}
-    allocated_session_id = ""
     creation_error = RuntimeError("Copilot post-create options update failed")
+    release_error = RuntimeError("Copilot partial-session deletion failed")
 
     async def create_session_async(*, session_id: str = "sdk-generated-session-id", **_kwargs: Any) -> None:
-        nonlocal allocated_session_id
-        allocated_session_id = session_id
         sessions.add(session_id)
         raise creation_error
 
+    async def delete_session_async(session_id: str) -> None:
+        if retry_surface is not None and client.delete_session.await_count == 1:
+            raise release_error
+        sessions.remove(session_id)
+
     client.create_session.side_effect = create_session_async
     _mock_session_storage(client=client, sessions=sessions)
+    client.delete_session.side_effect = delete_session_async
     conversation_id = str(uuid4())
     target = GitHubCopilotTarget(model_name="gpt-5-mini", retain_session=retain_session)
     with caplog.at_level(logging.INFO, logger=TARGET_LOGGER):
@@ -1337,8 +1524,10 @@ async def test_normalizer_cleans_up_partial_creation_async(
                 conversation_id=conversation_id,
             )
 
-    assert exc_info.value.__cause__ is creation_error
-    assert allocated_session_id == client.create_session.await_args.kwargs["session_id"]
+    allocated_session_id = client.create_session.await_args.kwargs["session_id"]
+    assert exc_info.value.__cause__ is (release_error if retry_surface is not None else creation_error)
+    if retry_surface is not None:
+        assert release_error.__context__ is creation_error
     assert str(UUID(allocated_session_id)) == allocated_session_id
     assert allocated_session_id != "sdk-session-id"
     client.create_session.assert_awaited_once()
@@ -1346,12 +1535,56 @@ async def test_normalizer_cleans_up_partial_creation_async(
     session.send_and_wait.assert_not_awaited()
     session.send.assert_not_awaited()
     client.stop.assert_not_awaited()
-    await target.cleanup_target_async()
-    client.stop.assert_awaited_once()
     assert _message_roles_and_errors(memory=sqlite_instance, conversation_id=conversation_id) == [
         ("user", "none"),
         ("assistant", "processing"),
     ]
+    if retry_surface is not None:
+        assert sessions == {"unrelated-session-id", allocated_session_id}
+        assert client.delete_session.await_args_list == [call(allocated_session_id)]
+        with pytest.raises(Exception, match="Error sending prompt with conversation ID:") as retry_error:
+            await _send_normalized_async(
+                target=target,
+                original_value="Retry after failed partial cleanup.",
+                conversation_id=conversation_id,
+            )
+        assert isinstance(retry_error.value.__cause__, RuntimeError)
+        assert "retired" in str(retry_error.value.__cause__).lower()
+        client.create_session.assert_awaited_once()
+        client.get_session_metadata.assert_awaited_once_with(allocated_session_id)
+        assert client.delete_session.await_args_list == [call(allocated_session_id)]
+        session.send_and_wait.assert_not_awaited()
+        session.send.assert_not_awaited()
+        assert _message_roles_and_errors(memory=sqlite_instance, conversation_id=conversation_id) == [
+            ("user", "none"),
+            ("assistant", "processing"),
+            ("user", "none"),
+            ("assistant", "processing"),
+        ]
+
+    try:
+        if retry_surface == "selected-reset":
+            await target.reset_conversation_async(conversation_id=conversation_id)
+            assert client.delete_session.await_args_list == [
+                call(allocated_session_id),
+                call(allocated_session_id),
+            ]
+            assert client.get_session_metadata.await_args_list == [
+                call(allocated_session_id),
+                call(allocated_session_id),
+            ]
+            assert sessions == {"unrelated-session-id"}
+            client.stop.assert_not_awaited()
+    finally:
+        await target.cleanup_target_async()
+
+    client.stop.assert_awaited_once()
+    if retry_surface is not None:
+        assert client.get_session_metadata.await_args_list == [
+            call(allocated_session_id),
+            call(allocated_session_id),
+        ]
+    assert sessions == ({"unrelated-session-id", allocated_session_id} if retain_session else {"unrelated-session-id"})
     retained_logs = [
         r.getMessage()
         for r in caplog.records
@@ -1364,35 +1597,156 @@ async def test_normalizer_cleans_up_partial_creation_async(
         assert sessions == {"unrelated-session-id", allocated_session_id}
         assert retained_logs == [f"Retaining Copilot session {allocated_session_id} as requested; delete it manually."]
     else:
-        client.delete_session.assert_awaited_once_with(allocated_session_id)
+        expected_delete_attempts = (
+            [call(allocated_session_id), call(allocated_session_id)]
+            if retry_surface is not None
+            else [call(allocated_session_id)]
+        )
+        assert client.delete_session.await_args_list == expected_delete_attempts
         assert sessions == {"unrelated-session-id"}
         assert not retained_logs
 
 
 @pytest.mark.usefixtures("patch_central_database")
-async def test_normalizer_deletes_owned_session_when_creation_is_cancelled_after_allocation_async(
+@pytest.mark.parametrize(
+    "failure_stage",
+    [
+        pytest.param("metadata", id="metadata-uncertainty"),
+        pytest.param("delete", id="persistent-delete-failure"),
+    ],
+)
+async def test_normalizer_reports_partial_creation_cleanup_retry_failure_async(
+    *,
     client: NonCallableMagicMock,
+    sqlite_instance: MemoryInterface,
+    failure_stage: str,
+) -> None:
+    sessions = {"unrelated-session-id"}
+    creation_error = RuntimeError("Copilot post-create options update failed")
+    initial_cleanup_error = RuntimeError("Initial partial-session cleanup failed")
+    terminal_cleanup_error = RuntimeError("Terminal partial-session cleanup failed")
+
+    async def create_session_async(*, session_id: str = "sdk-generated-session-id", **_kwargs: Any) -> None:
+        sessions.add(session_id)
+        raise creation_error
+
+    client.create_session.side_effect = create_session_async
+    _mock_session_storage(client=client, sessions=sessions)
+    if failure_stage == "metadata":
+        client.get_session_metadata.side_effect = [initial_cleanup_error, terminal_cleanup_error]
+    else:
+        client.delete_session.side_effect = [initial_cleanup_error, terminal_cleanup_error]
+
+    conversation_id = str(uuid4())
+    target = GitHubCopilotTarget(model_name="gpt-5-mini")
+    with pytest.raises(Exception, match="Error sending prompt with conversation ID:") as send_error:
+        await _send_normalized_async(
+            target=target,
+            original_value="Reply exactly HELLO.",
+            conversation_id=conversation_id,
+        )
+
+    allocated_session_id = client.create_session.await_args.kwargs["session_id"]
+    assert send_error.value.__cause__ is initial_cleanup_error
+    assert initial_cleanup_error.__context__ is creation_error
+    assert str(UUID(allocated_session_id)) == allocated_session_id
+    client.create_session.assert_awaited_once()
+    client.get_session_metadata.assert_awaited_once_with(allocated_session_id)
+    session = client.create_session.return_value
+    session.send_and_wait.assert_not_awaited()
+    session.send.assert_not_awaited()
+    assert _message_roles_and_errors(memory=sqlite_instance, conversation_id=conversation_id) == [
+        ("user", "none"),
+        ("assistant", "processing"),
+    ]
+    assert sessions == {"unrelated-session-id", allocated_session_id}
+    client.stop.assert_not_awaited()
+
+    with pytest.raises(RuntimeError) as cleanup_error:
+        await target.cleanup_target_async()
+
+    assert cleanup_error.value is terminal_cleanup_error
+    assert client.get_session_metadata.await_args_list == [
+        call(allocated_session_id),
+        call(allocated_session_id),
+    ]
+    if failure_stage == "metadata":
+        client.delete_session.assert_not_awaited()
+    else:
+        assert client.delete_session.await_args_list == [
+            call(allocated_session_id),
+            call(allocated_session_id),
+        ]
+    assert sessions == {"unrelated-session-id", allocated_session_id}
+    client.stop.assert_awaited_once()
+
+
+@pytest.mark.usefixtures("patch_central_database")
+@pytest.mark.parametrize(
+    "first_delete_failure",
+    [
+        pytest.param("none", id="cleanup-succeeds"),
+        pytest.param("runtime-error", id="first-delete-runtime-error"),
+        pytest.param("cancelled-error", id="first-delete-cancelled-error"),
+    ],
+)
+async def test_normalizer_deletes_owned_session_when_creation_is_cancelled_after_allocation_async(
+    *,
+    client: NonCallableMagicMock,
+    first_delete_failure: str,
 ) -> None:
     session = client.create_session.return_value
     sessions = {"unrelated-session-id"}
     allocated = asyncio.Event()
+    conversation_id = str(uuid4())
+    cancellation_message = "cancel caller after session allocation"
+    caller_cancellation: asyncio.CancelledError | None = None
+    cleanup_failure: RuntimeError | asyncio.CancelledError | None = None
+    if first_delete_failure == "runtime-error":
+        cleanup_failure = RuntimeError("first partial-session deletion failed")
+    elif first_delete_failure == "cancelled-error":
+        cleanup_failure = asyncio.CancelledError("cleanup-origin cancellation")
 
     async def create_session_async(*, session_id: str = "sdk-generated-session-id", **_kwargs: Any) -> None:
+        nonlocal caller_cancellation
         sessions.add(session_id)
         allocated.set()
-        await asyncio.Event().wait()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError as error:
+            caller_cancellation = error
+            raise
+
+    async def delete_session_async(session_id: str) -> None:
+        if client.delete_session.await_count == 1 and cleanup_failure is not None:
+            raise cleanup_failure
+        sessions.remove(session_id)
 
     client.create_session.side_effect = create_session_async
     _mock_session_storage(client=client, sessions=sessions)
+    client.delete_session.side_effect = delete_session_async
     target = GitHubCopilotTarget(model_name="gpt-5-mini")
-    request_task = asyncio.create_task(_send_normalized_async(target=target, original_value="Reply exactly HELLO."))
+    request_task = asyncio.create_task(
+        _send_normalized_async(
+            target=target,
+            original_value="Reply exactly HELLO.",
+            conversation_id=conversation_id,
+        )
+    )
     try:
         await asyncio.wait_for(allocated.wait(), timeout=2.0)
-        request_task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await request_task
+        request_task.cancel(cancellation_message)
+        with pytest.raises(asyncio.CancelledError) as cancellation_error:
+            await asyncio.wait_for(request_task, timeout=2.0)
     finally:
         await _cancel_tasks_async(request_task)
+
+    assert request_task.done()
+    assert request_task.cancelled()
+    assert caller_cancellation is not None
+    assert cancellation_error.value is caller_cancellation
+    assert cancellation_error.value.args == (cancellation_message,)
+    assert cancellation_error.value.__cause__ is cleanup_failure
 
     client.create_session.assert_awaited_once()
     allocated_id = client.create_session.await_args.kwargs["session_id"]
@@ -1401,6 +1755,19 @@ async def test_normalizer_deletes_owned_session_when_creation_is_cancelled_after
     session.send_and_wait.assert_not_awaited()
     session.send.assert_not_awaited()
     client.stop.assert_not_awaited()
+    if first_delete_failure == "none":
+        assert sessions == {"unrelated-session-id"}
+    else:
+        assert sessions == {"unrelated-session-id", allocated_id}
+        await target.reset_conversation_async(conversation_id=conversation_id)
+        assert client.get_session_metadata.await_args_list == [
+            call(allocated_id),
+            call(allocated_id),
+        ]
+        assert client.delete_session.await_args_list == [call(allocated_id), call(allocated_id)]
+        assert sessions == {"unrelated-session-id"}
+        client.stop.assert_not_awaited()
+
     await target.cleanup_target_async()
     client.stop.assert_awaited_once()
     assert sessions == {"unrelated-session-id"}
@@ -1458,12 +1825,28 @@ async def test_normalizer_stops_owned_client_when_startup_is_cancelled_async(
 
 @pytest.mark.usefixtures("patch_central_database")
 @pytest.mark.parametrize(
-    ("github_token", "use_working_directory", "max_requests_per_minute"),
+    ("github_token", "environment_token", "expected_github_token", "use_working_directory", "max_requests_per_minute"),
     [
-        pytest.param("  dummy-github-token  ", False, None, id="token-only"),
-        pytest.param(None, True, None, id="directory-only"),
-        pytest.param(None, False, 30, id="throttle-only"),
-        pytest.param("  dummy-github-token  ", True, 30, id="all-options"),
+        pytest.param("  dummy-github-token  ", None, "  dummy-github-token  ", False, None, id="token-only"),
+        pytest.param(None, None, None, True, None, id="directory-only"),
+        pytest.param(None, "", None, False, 30, id="throttle-only"),
+        pytest.param("  dummy-github-token  ", None, "  dummy-github-token  ", True, 30, id="all-options"),
+        pytest.param(
+            "  dummy-github-token  ",
+            "environment-github-token",
+            "  dummy-github-token  ",
+            False,
+            None,
+            id="explicit-token-precedence",
+        ),
+        pytest.param(
+            None,
+            "environment-github-token",
+            "environment-github-token",
+            False,
+            None,
+            id="environment-token",
+        ),
     ],
 )
 async def test_normalizer_forwards_options_without_exposing_token_async(
@@ -1473,10 +1856,17 @@ async def test_normalizer_forwards_options_without_exposing_token_async(
     caplog: pytest.LogCaptureFixture,
     tmp_path: Path,
     github_token: str | None,
+    environment_token: str | None,
+    expected_github_token: str | None,
     use_working_directory: bool,
     max_requests_per_minute: int | None,
 ) -> None:
     with (
+        patch.dict(
+            "os.environ",
+            {} if environment_token is None else {"GITHUB_TOKEN": environment_token},
+            clear=True,
+        ),
         caplog.at_level(logging.DEBUG, logger=TARGET_LOGGER),
         patch.object(asyncio, "sleep", new_callable=AsyncMock) as mock_sleep,
     ):
@@ -1489,7 +1879,7 @@ async def test_normalizer_forwards_options_without_exposing_token_async(
         response = await _send_normalized_async(target=target, original_value="Reply exactly HELLO.")
         await target.cleanup_target_async()
     sdk.CopilotClient.assert_called_once_with(
-        github_token=github_token, working_directory=str(tmp_path) if use_working_directory else None
+        github_token=expected_github_token, working_directory=str(tmp_path) if use_working_directory else None
     )
     assert response.get_piece().converted_value == "HELLO"
     client.create_session.return_value.send_and_wait.assert_awaited_once()
@@ -1500,8 +1890,9 @@ async def test_normalizer_forwards_options_without_exposing_token_async(
         mock_sleep.assert_not_awaited()
     if use_working_directory:
         assert target.get_identifier().params["working_directory"] == str(tmp_path)
-    assert "dummy-github-token" not in target.get_identifier().model_dump_json()
-    assert "dummy-github-token" not in caplog.text
+    for token in ("dummy-github-token", "environment-github-token"):
+        assert token not in target.get_identifier().model_dump_json()
+        assert token not in caplog.text
 
 
 def test_init_without_copilot_sdk_reports_installation_guidance() -> None:

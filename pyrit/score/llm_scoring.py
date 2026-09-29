@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import uuid
@@ -131,7 +132,7 @@ async def _run_llm_scoring_async(
         normalizer (PromptNormalizer | None): Normalizer used to send the scoring round-trip
             and resolve scorer evidence. Injectable for testing; defaults to a fresh
             ``PromptNormalizer()`` when not supplied.
-        fresh_conversation_per_attempt (bool): Use a new conversation for each JSON retry when
+        fresh_conversation_per_attempt (bool): Opt into fresh conversations for JSON retries when
             target history cannot be rolled back. Defaults to False.
         observation_metadata (Mapping[str, str] | None): Scorer-specific state required to
             reconstruct the response parser during replay. Defaults to None.
@@ -161,6 +162,9 @@ async def _run_llm_scoring_async(
         Exception: For other unexpected errors during scoring.
     """
     conversation_id = str(uuid.uuid4())
+    use_fresh_conversation_per_attempt = (
+        fresh_conversation_per_attempt and not chat_target.capabilities.supports_editable_history
+    )
     expectation = _get_current_scoring_expectation()
     if expectation is None and objective is not None:
         expectation = ScoringExpectation(objective=objective)
@@ -197,7 +201,7 @@ async def _run_llm_scoring_async(
         observation_scorable is not None and scored_evidence_digest is not None and has_required_evidence
     )
 
-    if system_prompt is not None and not fresh_conversation_per_attempt:
+    if system_prompt is not None and not use_fresh_conversation_per_attempt:
         chat_target.set_system_prompt(
             system_prompt=system_prompt,
             conversation_id=conversation_id,
@@ -279,7 +283,7 @@ async def _run_llm_scoring_async(
 
     # Editable targets retry on a rolled-back conversation; non-editable judges opt into fresh sessions.
     try:
-        if fresh_conversation_per_attempt:
+        if use_fresh_conversation_per_attempt:
             first_attempt = True
 
             @pyrit_json_retry
@@ -287,30 +291,42 @@ async def _run_llm_scoring_async(
                 nonlocal first_attempt
                 attempt_conversation_id = conversation_id if first_attempt else str(uuid.uuid4())
                 attempt_message = scorer_llm_request if first_attempt else scorer_llm_request.duplicate()
-                if system_prompt is not None:
-                    chat_target.set_system_prompt(
-                        system_prompt=system_prompt,
-                        conversation_id=attempt_conversation_id,
-                    )
                 first_attempt = False
-                response = await resolved_normalizer.send_prompt_async(
-                    message=attempt_message,
-                    conversation_id=attempt_conversation_id,
-                    target=chat_target,
-                )
-                if not response:
-                    raise ValueError(f"No response received for conversation ID: {attempt_conversation_id}")
-                _capture_response(response)
+                attempt_cancellation: asyncio.CancelledError | None = None
                 try:
+                    if system_prompt is not None:
+                        chat_target.set_system_prompt(
+                            system_prompt=system_prompt,
+                            conversation_id=attempt_conversation_id,
+                        )
+                    response = await resolved_normalizer.send_prompt_async(
+                        message=attempt_message,
+                        conversation_id=attempt_conversation_id,
+                        target=chat_target,
+                    )
+                    if not response:
+                        raise ValueError(f"No response received for conversation ID: {attempt_conversation_id}")
+                    _capture_response(response)
                     return _parse(response)
-                except InvalidJsonException:
+                except asyncio.CancelledError as error:
+                    attempt_cancellation = error
+                    raise
+                finally:
                     try:
                         await chat_target.reset_conversation_async(conversation_id=attempt_conversation_id)
-                    except Exception as reset_error:
+                    except asyncio.CancelledError as cleanup_error:
+                        if attempt_cancellation is not None:
+                            raise attempt_cancellation from cleanup_error
+                        raise
+                    except (Exception, BaseExceptionGroup) as cleanup_error:
+                        if attempt_cancellation is not None:
+                            raise attempt_cancellation from cleanup_error
+                        current_task = asyncio.current_task()
+                        if current_task is not None and current_task.cancelling():
+                            raise asyncio.CancelledError from cleanup_error
                         raise RuntimeError(
-                            "Could not release the malformed judge session; refusing another retry."
-                        ) from reset_error
-                    raise
+                            "Could not release the fresh judge session; refusing to continue scoring."
+                        ) from cleanup_error
 
             unvalidated_score: UnvalidatedScore = await _fresh_attempt_async()
         else:
