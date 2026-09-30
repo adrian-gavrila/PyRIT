@@ -28,6 +28,7 @@ class _ConversationState:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     session: "CopilotSession | None" = None
     pending_session_id: str | None = None
+    disconnect_error: BaseException | None = None
     retired: bool = False
 
 
@@ -104,6 +105,7 @@ class GitHubCopilotTarget(PromptTarget):
         self._retain_session = retain_session
         self._response_timeout_seconds = response_timeout_seconds
         self._client: CopilotClient | None = None
+        self._failed_startup_clients: list[CopilotClient] = []
         self._runtime_status: GetStatusResponse | None = None
         self._client_start_lock = asyncio.Lock()
         self._lifecycle_condition = asyncio.Condition()
@@ -253,13 +255,15 @@ class GitHubCopilotTarget(PromptTarget):
 
         Unknown or already released conversations are no-ops. Established conversations
         become retired before release, so a later send cannot silently create a new native
-        history for the same PyRIT conversation ID.
+        history for the same PyRIT conversation ID. A failed retained-session disconnect
+        remains unconfirmed on subsequent resets.
 
         Args:
             conversation_id (str): The PyRIT conversation ID to release.
 
         Raises:
             asyncio.CancelledError: If the caller is cancelled while waiting for cleanup.
+            RuntimeError: If a previous retained-session disconnect failed.
         """
         async with self._lifecycle_condition:
             conversation = self._conversations.get(conversation_id)
@@ -397,15 +401,24 @@ class GitHubCopilotTarget(PromptTarget):
                 await client.start()
                 self._runtime_status = await client.get_status()
             except BaseException as error:
+                self._failed_startup_clients.append(client)
                 try:
                     await client.stop()
                 except BaseException as cleanup_error:
                     if isinstance(error, asyncio.CancelledError):
                         raise error from cleanup_error
+                    current_task = asyncio.current_task()
+                    if (
+                        isinstance(cleanup_error, asyncio.CancelledError)
+                        and current_task is not None
+                        and current_task.cancelling()
+                    ):
+                        raise cleanup_error from error
                     raise BaseExceptionGroup(
                         "Copilot client startup and cleanup failed",
                         [error, cleanup_error],
                     ) from error
+                self._failed_startup_clients.remove(client)
                 raise
 
             async with self._lifecycle_condition:
@@ -449,7 +462,16 @@ class GitHubCopilotTarget(PromptTarget):
             return
         session_id = session.session_id
         if self._retain_session:
-            await session.disconnect()
+            if conversation.disconnect_error is not None:
+                raise RuntimeError(
+                    f"Copilot session {session_id} release remains unconfirmed after a failed disconnect."
+                ) from conversation.disconnect_error
+            try:
+                await session.disconnect()
+            except BaseException as error:
+                # The SDK can make later disconnect calls no-ops even when the first release failed.
+                conversation.disconnect_error = error
+                raise
             logger.info("Retaining Copilot session %s as requested; delete it manually.", session_id)
         else:
             await client.delete_session(session_id)
@@ -481,6 +503,14 @@ class GitHubCopilotTarget(PromptTarget):
                 await client.stop()
             except BaseException as error:
                 errors.append(error)
+
+        for failed_client in tuple(self._failed_startup_clients):
+            try:
+                await failed_client.stop()
+            except BaseException as error:
+                errors.append(error)
+            else:
+                self._failed_startup_clients.remove(failed_client)
 
         if len(errors) == 1:
             raise errors[0]
