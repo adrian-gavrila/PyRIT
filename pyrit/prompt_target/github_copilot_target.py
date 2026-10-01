@@ -39,6 +39,8 @@ class GitHubCopilotTarget(PromptTarget):
     Capture INFO logs for session mapping and SDK/runtime version diagnostics.
     """
 
+    GITHUB_TOKEN_ENVIRONMENT_VARIABLE: str = "GITHUB_TOKEN"
+
     _DEFAULT_CONFIGURATION: TargetConfiguration = TargetConfiguration(
         capabilities=TargetCapabilities(supports_multi_turn=True, supports_system_prompt=True)
     )
@@ -83,7 +85,13 @@ class GitHubCopilotTarget(PromptTarget):
             raise ValueError("github_token must not be blank when supplied.")
         if not math.isfinite(response_timeout_seconds) or response_timeout_seconds <= 0:
             raise ValueError("response_timeout_seconds must be a finite positive number.")
-        resolved_github_token = get_non_required_value(env_var_name="GITHUB_TOKEN", passed_value=github_token) or None
+        resolved_github_token = (
+            get_non_required_value(
+                env_var_name=self.GITHUB_TOKEN_ENVIRONMENT_VARIABLE,
+                passed_value=github_token,
+            )
+            or None
+        )
 
         self._working_directory: str | None = None
         if working_directory is not None:
