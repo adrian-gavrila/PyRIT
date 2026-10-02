@@ -420,7 +420,9 @@ async def test_from_question_scores_end_to_end(patch_central_database, scorer_tr
 
 
 @pytest.mark.usefixtures("patch_central_database")
-async def test_self_ask_true_false_rejects_nontext_for_noneditable_target_async(tmp_path: Path) -> None:
+async def test_self_ask_true_false_scores_nontext_in_fresh_conversations_for_noneditable_target_async(
+    tmp_path: Path,
+) -> None:
     image_path = tmp_path / "image.png"
     image_path.write_bytes(b"\x89PNG\r\n\x1a\n")
     target = MockPromptTarget(
@@ -435,6 +437,28 @@ async def test_self_ask_true_false_rejects_nontext_for_noneditable_target_async(
             )
         )
     )
+    sent_messages: list[Message] = []
+    reset_conversation_ids: list[str] = []
+
+    async def send_judge_reply_async(*, normalized_conversation: list[Message]) -> list[Message]:
+        message = normalized_conversation[-1]
+        sent_messages.append(message)
+        reply = (
+            "malformed judge response"
+            if len(sent_messages) == 1
+            else '{"score_value":true,"description":"Visible","rationale":"The image has content."}'
+        )
+        return [
+            MessagePiece(
+                role="assistant",
+                original_value=reply,
+                conversation_id=message.get_piece().conversation_id,
+            ).to_message()
+        ]
+
+    async def reset_conversation_async(*, conversation_id: str) -> None:
+        reset_conversation_ids.append(conversation_id)
+
     scorer = SelfAskTrueFalseScorer.from_question(
         chat_target=target,
         question=TrueFalseQuestion(
@@ -454,13 +478,21 @@ async def test_self_ask_true_false_rejects_nontext_for_noneditable_target_async(
         ).to_message()
     )
 
-    with pytest.raises(RuntimeError, match="Error in scorer SelfAskTrueFalseScorer") as exc_info:
-        await scorer.score_async(
+    with (
+        patch.object(target, "_send_prompt_to_target_async", new=AsyncMock(side_effect=send_judge_reply_async)),
+        patch.object(target, "reset_conversation_async", new=AsyncMock(side_effect=reset_conversation_async)),
+    ):
+        scores = await scorer.score_async(
             scorable=MessageScorable.from_message(image_message),
             expectation=ScoringExpectation(objective="Describe this image"),
         )
 
-    assert isinstance(exc_info.value.__cause__, ValueError)
-    assert "non-text" in str(exc_info.value.__cause__)
-    assert "editable history" in str(exc_info.value.__cause__)
-    assert target.prompt_sent == []
+    assert len(scores) == 1
+    assert scores[0].get_value() is True
+    sent_conversation_ids = [message.get_piece().conversation_id for message in sent_messages]
+    assert len(set(sent_conversation_ids)) == 2
+    assert reset_conversation_ids == sent_conversation_ids
+    for message in sent_messages:
+        assert [piece.converted_value_data_type for piece in message.message_pieces] == ["text", "image_path"]
+        assert message.message_pieces[0].converted_value.startswith("objective: Describe this image\nresponse:")
+        assert message.message_pieces[1].converted_value == str(image_path)

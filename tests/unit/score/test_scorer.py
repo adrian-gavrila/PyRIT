@@ -2,6 +2,7 @@
 # Licensed under the MIT license.
 
 import asyncio
+import logging
 import uuid
 from contextlib import suppress
 from dataclasses import replace
@@ -709,9 +710,10 @@ async def test_fresh_llm_scoring_preserves_caller_cancellation_async(
         pytest.param("blocked", True, id="blocked-reply-release-fails"),
     ],
 )
-async def test_fresh_judgment_release_controls_observation_persistence_async(
+async def test_fresh_judgment_release_failure_keeps_scoring_outcome_async(
     *,
     sqlite_instance: MemoryInterface,
+    caplog: pytest.LogCaptureFixture,
     reply_kind: str,
     release_fails: bool,
 ) -> None:
@@ -770,44 +772,41 @@ async def test_fresh_judgment_release_controls_observation_persistence_async(
             "add_scores_to_memory",
             wraps=sqlite_instance.add_scores_to_memory,
         ) as persist_scores,
+        caplog.at_level(logging.WARNING, logger="pyrit.score.llm_scoring"),
     ):
-        if release_fails:
-            with pytest.raises(RuntimeError, match="Error in scorer SelfAskRefusalScorer") as exc_info:
+        if reply_kind == "malformed":
+            with pytest.raises(InvalidJsonException):
                 await scorer.score_async(scorable=scorable, expectation=expectation)
-            helper_error = exc_info.value.__cause__
-            assert isinstance(helper_error, Exception)
-            assert "Error scoring prompt with original prompt ID" in str(helper_error)
-            assert str(saved_response.get_piece().id) in str(helper_error)
-            release_error = helper_error.__cause__
-            assert isinstance(release_error, RuntimeError)
-            assert "Could not release" in str(release_error)
-            assert release_error.__cause__ is release_failure
             persist_scores.assert_not_called()
         else:
             [score] = await scorer.score_async(scorable=scorable, expectation=expectation)
-            assert score.is_undetermined
             assert len(score.observation_ids) == 1
             [observation] = sqlite_instance.get_observations(observation_ids=score.observation_ids)
-            assert observation.acquisition is Acquisition.ERROR
-            assert observation.metadata == {"reason": "scorer_response_blocked"}
             assert isinstance(observation.payload, ScorerTargetResponsePayload)
             assert observation.payload.message_piece_ids == (response_piece_ids[0],)
             persist_scores.assert_called_once()
             [persisted_observation] = persist_scores.call_args.kwargs["observations"]
             assert persisted_observation.id == observation.id
+            if reply_kind == "valid":
+                assert score.get_value() is False
+                assert observation.acquisition is Acquisition.COMPLETE
+            else:
+                assert score.is_undetermined
+                assert observation.acquisition is Acquisition.ERROR
+                assert observation.metadata == {"reason": "scorer_response_blocked"}
+                [replayed_score] = await scorer.score_observation_async(
+                    observation=observation,
+                    expectation=expectation,
+                )
+                assert replayed_score.is_undetermined
 
-            [replayed_score] = await scorer.score_observation_async(
-                observation=observation,
-                expectation=expectation,
-            )
-            assert replayed_score.is_undetermined
-
-        assert len(sent_conversation_ids) == 1
-        assert len(request_piece_ids) == 1
-        assert len(response_piece_ids) == 1
-        target_send.assert_awaited_once()
-        reset.assert_awaited_once()
+        expected_attempts = 2 if reply_kind == "malformed" else 1
+        assert target_send.await_count == expected_attempts
+        assert len(set(sent_conversation_ids)) == expected_attempts
         assert reset_conversation_ids == sent_conversation_ids
+        release_warnings = [r for r in caplog.records if r.getMessage().startswith("Could not release")]
+        assert len(release_warnings) == (expected_attempts if release_fails else 0)
+        assert all(r.exc_info is not None and r.exc_info[1] is release_failure for r in release_warnings)
         [stored_request, stored_response] = sqlite_instance.get_message_pieces(
             prompt_ids=[request_piece_ids[0], response_piece_ids[0]]
         )

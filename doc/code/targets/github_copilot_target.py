@@ -45,6 +45,10 @@
 # The target disables SDK tools and does not expose editable or imported native
 # history. Workflows that rewrite or branch earlier turns need a target with
 # editable history. See [target capabilities](./6_1_target_capabilities.ipynb).
+#
+# An empty reply is saved as an empty response, and the conversation continues.
+# Any other failed turn ends its native conversation. Later sends with that
+# conversation ID fail, so use a new conversation ID to continue.
 
 # %%
 from uuid import uuid4

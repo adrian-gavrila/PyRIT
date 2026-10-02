@@ -20,7 +20,14 @@ from unit.mocks import store_message
 
 from pyrit.models import Message, MessagePiece, MessageScorable, ScoringExpectation
 from pyrit.prompt_normalizer import PromptNormalizer
-from pyrit.prompt_target import GitHubCopilotTarget
+from pyrit.prompt_target import (
+    CapabilityHandlingPolicy,
+    CapabilityName,
+    GitHubCopilotTarget,
+    TargetCapabilities,
+    TargetConfiguration,
+    UnsupportedCapabilityBehavior,
+)
 from pyrit.score import SelfAskTrueFalseScorer, TrueFalseQuestion
 
 if TYPE_CHECKING:
@@ -475,6 +482,7 @@ async def test_retained_reset_does_not_confirm_failed_sdk_disconnect_async(
     *,
     sdk: Any,
     client: NonCallableMagicMock,
+    caplog: pytest.LogCaptureFixture,
     cancel_release: bool,
 ) -> None:
     release_started = asyncio.Event()
@@ -525,13 +533,13 @@ async def test_retained_reset_does_not_confirm_failed_sdk_disconnect_async(
                 assert first_reset.value is release_error
                 first_failure = first_reset.value
 
-            for _ in range(2):
-                with pytest.raises(RuntimeError, match="unconfirmed") as repeated_reset:
+            with caplog.at_level(logging.WARNING, logger=TARGET_LOGGER):
+                for _ in range(2):
                     await target.reset_conversation_async(conversation_id="conversation-a")
-                assert repeated_reset.value.__cause__ is first_failure
-                assert target._conversations["conversation-a"].session is session_a
+                    assert target._conversations["conversation-a"].session is session_a
             disconnect.assert_awaited_once()
-            connection.request.assert_awaited_once_with("session.destroy", {"sessionId": "retained-native"})
+            connection.request.assert_awaited_once()
+            assert connection.request.await_args.args[1] == {"sessionId": "retained-native"}
             with pytest.raises(RuntimeError, match="retired"):
                 await target.send_prompt_async(
                     message=_user_message(conversation_id="conversation-a", original_value="cannot reopen")
@@ -544,11 +552,14 @@ async def test_retained_reset_does_not_confirm_failed_sdk_disconnect_async(
             session_b.disconnect.assert_not_awaited()
             _assert_no_resource_release(client=client)
 
-            with pytest.raises(RuntimeError, match="unconfirmed") as cleanup:
+            with caplog.at_level(logging.WARNING, logger=TARGET_LOGGER):
                 await target.cleanup_target_async()
-            assert cleanup.value.__cause__ is first_failure
-            with pytest.raises(RuntimeError, match="unconfirmed"):
                 await target.reset_conversation_async(conversation_id="conversation-a")
+            unconfirmed_warnings = [
+                r for r in caplog.records if r.name == TARGET_LOGGER and "unconfirmed" in r.getMessage()
+            ]
+            assert len(unconfirmed_warnings) == 3
+            assert all(r.exc_info is not None and r.exc_info[1] is first_failure for r in unconfirmed_warnings)
             await target.reset_conversation_async(conversation_id="conversation-b")
             disconnect.assert_awaited_once()
             connection.request.assert_awaited_once()
@@ -902,7 +913,7 @@ async def test_normalizer_rejects_retired_conversation_but_allows_fresh_async(
             conversation_id=conversation_a,
         )
     assert isinstance(retired_error.value.__cause__, RuntimeError)
-    assert "retired" in str(retired_error.value.__cause__).lower()
+    assert "retired after a failed send: TimeoutError('ambiguous mock send')" in str(retired_error.value.__cause__)
 
     conversation_b = "fresh-conversation"
     response_b = await _send_normalized_async(
@@ -1218,6 +1229,73 @@ def test_target_advertises_native_text_only_capabilities() -> None:
     assert capabilities.output_modalities == frozenset({frozenset({"text"})})
 
 
+@pytest.mark.usefixtures("patch_central_database", "sdk")
+@pytest.mark.parametrize(
+    "configuration",
+    [
+        pytest.param(
+            TargetConfiguration(
+                capabilities=TargetCapabilities(supports_multi_turn=True, supports_system_prompt=True),
+                policy=CapabilityHandlingPolicy(
+                    behaviors={
+                        CapabilityName.MULTI_TURN: UnsupportedCapabilityBehavior.RAISE,
+                        CapabilityName.SYSTEM_PROMPT: UnsupportedCapabilityBehavior.RAISE,
+                        CapabilityName.JSON_SCHEMA: UnsupportedCapabilityBehavior.RAISE,
+                    }
+                ),
+            ),
+            id="policy-override",
+        ),
+        pytest.param(
+            TargetConfiguration(capabilities=TargetCapabilities(supports_multi_turn=True)),
+            id="narrowed",
+        ),
+    ],
+)
+def test_target_accepts_custom_configuration_within_native_capabilities(configuration: TargetConfiguration) -> None:
+    target = GitHubCopilotTarget(model_name="gpt-5-mini", custom_configuration=configuration)
+
+    assert target.configuration is configuration
+
+
+@pytest.mark.parametrize(
+    ("capabilities", "unsupported"),
+    [
+        pytest.param(
+            TargetCapabilities(
+                supports_multi_turn=True, supports_system_prompt=True, supports_multi_message_pieces=True
+            ),
+            "supports_multi_message_pieces",
+            id="multi-piece",
+        ),
+        pytest.param(
+            TargetCapabilities(supports_multi_turn=True, supports_system_prompt=True, supports_editable_history=True),
+            "supports_editable_history",
+            id="editable-history",
+        ),
+        pytest.param(
+            TargetCapabilities(
+                supports_multi_turn=True,
+                supports_system_prompt=True,
+                input_modalities=frozenset({frozenset({"text"}), frozenset({"image_path"})}),
+            ),
+            "input_modalities",
+            id="image-input",
+        ),
+    ],
+)
+def test_target_rejects_custom_configuration_with_unimplemented_capability(
+    *,
+    capabilities: TargetCapabilities,
+    unsupported: str,
+) -> None:
+    with pytest.raises(ValueError, match=rf"does not implement: {unsupported}\.$"):
+        GitHubCopilotTarget(
+            model_name="gpt-5-mini",
+            custom_configuration=TargetConfiguration(capabilities=capabilities),
+        )
+
+
 @pytest.mark.usefixtures("patch_central_database")
 @pytest.mark.parametrize(
     ("capture_before", "requested_model", "expected_model", "expected_error"),
@@ -1439,7 +1517,7 @@ async def test_normalizer_surfaces_dispatch_timeout_and_cleans_up_without_replay
 @pytest.mark.usefixtures("patch_central_database")
 @pytest.mark.parametrize(
     "invalid_reply",
-    ["empty", "subagent", "empty-subagent", "absent", "non-assistant"],
+    ["subagent", "empty-subagent", "non-assistant"],
 )
 async def test_normalizer_rejects_invalid_reply_async(
     *,
@@ -1453,42 +1531,80 @@ async def test_normalizer_rejects_invalid_reply_async(
     empty_subagent_reply = replace(_assistant_reply(""), agent_id="sdk-subagent-id")
     session = client.create_session.return_value
     session.send_and_wait.return_value = {
-        "empty": _assistant_reply(""),
         "subagent": replace(reply, agent_id="sdk-subagent-id"),
         "empty-subagent": empty_subagent_reply,
-        "absent": None,
         "non-assistant": replace(reply, type=SessionEventType.SESSION_IDLE, data=SessionIdleData(aborted=False)),
     }[invalid_reply]
     conversation_id = str(uuid4())
     target = GitHubCopilotTarget(model_name="gpt-5-mini")
 
-    if invalid_reply in {"empty", "absent"}:
-        response = await _send_normalized_async(
+    with pytest.raises(Exception, match="Error sending prompt with conversation ID:") as exc_info:
+        await _send_normalized_async(
             target=target,
             original_value="Reply exactly HELLO.",
             conversation_id=conversation_id,
         )
-        assert response.get_piece().converted_value == ""
-        expected_response_error = "empty"
-    else:
-        with pytest.raises(Exception, match="Error sending prompt with conversation ID:") as exc_info:
-            await _send_normalized_async(
-                target=target,
-                original_value="Reply exactly HELLO.",
-                conversation_id=conversation_id,
-            )
-        assert isinstance(exc_info.value.__cause__, ValueError)
-        expected_response_error = "processing"
+    assert isinstance(exc_info.value.__cause__, ValueError)
 
     assert _message_roles_and_errors(memory=sqlite_instance, conversation_id=conversation_id) == [
         ("user", "none"),
-        ("assistant", expected_response_error),
+        ("assistant", "processing"),
     ]
     session.send_and_wait.assert_awaited_once()
     session.on.return_value.assert_called_once_with()
     client.delete_session.assert_awaited_once_with("sdk-session-id")
+    with pytest.raises(Exception, match="Error sending prompt with conversation ID:") as retired_error:
+        await _send_normalized_async(
+            target=target,
+            original_value="Reply exactly HELLO again.",
+            conversation_id=conversation_id,
+        )
+    assert "retired after a failed send: ValueError(" in str(retired_error.value.__cause__)
+    session.send_and_wait.assert_awaited_once()
     client.stop.assert_not_awaited()
     await target.cleanup_target_async()
+    client.stop.assert_awaited_once()
+
+
+@pytest.mark.usefixtures("patch_central_database")
+@pytest.mark.parametrize("empty_reply", ["empty", "absent"])
+async def test_empty_reply_keeps_native_conversation_async(
+    *,
+    client: NonCallableMagicMock,
+    sqlite_instance: MemoryInterface,
+    empty_reply: str,
+) -> None:
+    session = client.create_session.return_value
+    session.send_and_wait.side_effect = [
+        {"empty": _assistant_reply(""), "absent": None}[empty_reply],
+        _assistant_reply("HELLO"),
+    ]
+    conversation_id = str(uuid4())
+    target = GitHubCopilotTarget(model_name="gpt-5-mini")
+
+    empty_response = await _send_normalized_async(
+        target=target,
+        original_value="Reply exactly HELLO.",
+        conversation_id=conversation_id,
+    )
+    response = await _send_normalized_async(
+        target=target,
+        original_value="Reply exactly HELLO again.",
+        conversation_id=conversation_id,
+    )
+
+    assert empty_response.get_piece().converted_value == ""
+    assert response.get_piece().converted_value == "HELLO"
+    assert _message_roles_and_errors(memory=sqlite_instance, conversation_id=conversation_id) == [
+        ("user", "none"),
+        ("assistant", "empty"),
+        ("user", "none"),
+        ("assistant", "none"),
+    ]
+    client.create_session.assert_awaited_once()
+    client.delete_session.assert_not_awaited()
+    await target.cleanup_target_async()
+    client.delete_session.assert_awaited_once_with("sdk-session-id")
     client.stop.assert_awaited_once()
 
 
@@ -1583,6 +1699,7 @@ async def test_normalizer_rejects_unsafe_events_async(
         pytest.param(True, None, id="retain"),
         pytest.param(False, "terminal-cleanup", id="terminal-cleanup-retry"),
         pytest.param(False, "selected-reset", id="selected-reset-retry"),
+        pytest.param(True, "selected-reset", id="retain-selected-reset-retry"),
     ],
 )
 async def test_normalizer_cleans_up_partial_creation_async(
@@ -1593,23 +1710,35 @@ async def test_normalizer_cleans_up_partial_creation_async(
     retain_session: bool,
     retry_surface: str | None,
 ) -> None:
+    from copilot.generated.rpc import SessionsCloseRequest
+
     session = client.create_session.return_value
     sessions = {"unrelated-session-id"}
+    attached: set[str] = set()
     creation_error = RuntimeError("Copilot post-create options update failed")
-    release_error = RuntimeError("Copilot partial-session deletion failed")
+    release_error = RuntimeError("Copilot partial-session release failed")
 
     async def create_session_async(*, session_id: str = "sdk-generated-session-id", **_kwargs: Any) -> None:
         sessions.add(session_id)
+        attached.add(session_id)
         raise creation_error
 
     async def delete_session_async(session_id: str) -> None:
         if retry_surface is not None and client.delete_session.await_count == 1:
             raise release_error
         sessions.remove(session_id)
+        attached.discard(session_id)
+
+    async def close_session_async(request: SessionsCloseRequest) -> None:
+        if retry_surface is not None and client.rpc.sessions.close.await_count == 1:
+            raise release_error
+        attached.discard(request.session_id)
 
     client.create_session.side_effect = create_session_async
     _mock_session_storage(client=client, sessions=sessions)
     client.delete_session.side_effect = delete_session_async
+    client.rpc.sessions.close = AsyncMock(side_effect=close_session_async)
+    release = client.rpc.sessions.close if retain_session else client.delete_session
     conversation_id = str(uuid4())
     target = GitHubCopilotTarget(model_name="gpt-5-mini", retain_session=retain_session)
     with caplog.at_level(logging.INFO, logger=TARGET_LOGGER):
@@ -1621,6 +1750,9 @@ async def test_normalizer_cleans_up_partial_creation_async(
             )
 
     allocated_session_id = client.create_session.await_args.kwargs["session_id"]
+    release_call = (
+        call(SessionsCloseRequest(session_id=allocated_session_id)) if retain_session else call(allocated_session_id)
+    )
     assert exc_info.value.__cause__ is (release_error if retry_surface is not None else creation_error)
     if retry_surface is not None:
         assert release_error.__context__ is creation_error
@@ -1637,7 +1769,8 @@ async def test_normalizer_cleans_up_partial_creation_async(
     ]
     if retry_surface is not None:
         assert sessions == {"unrelated-session-id", allocated_session_id}
-        assert client.delete_session.await_args_list == [call(allocated_session_id)]
+        assert attached == {allocated_session_id}
+        assert release.await_args_list == [release_call]
         with pytest.raises(Exception, match="Error sending prompt with conversation ID:") as retry_error:
             await _send_normalized_async(
                 target=target,
@@ -1648,7 +1781,7 @@ async def test_normalizer_cleans_up_partial_creation_async(
         assert "retired" in str(retry_error.value.__cause__).lower()
         client.create_session.assert_awaited_once()
         client.get_session_metadata.assert_awaited_once_with(allocated_session_id)
-        assert client.delete_session.await_args_list == [call(allocated_session_id)]
+        assert release.await_args_list == [release_call]
         session.send_and_wait.assert_not_awaited()
         session.send.assert_not_awaited()
         assert _message_roles_and_errors(memory=sqlite_instance, conversation_id=conversation_id) == [
@@ -1660,16 +1793,17 @@ async def test_normalizer_cleans_up_partial_creation_async(
 
     try:
         if retry_surface == "selected-reset":
-            await target.reset_conversation_async(conversation_id=conversation_id)
-            assert client.delete_session.await_args_list == [
-                call(allocated_session_id),
-                call(allocated_session_id),
-            ]
+            with caplog.at_level(logging.INFO, logger=TARGET_LOGGER):
+                await target.reset_conversation_async(conversation_id=conversation_id)
+            assert release.await_args_list == [release_call, release_call]
             assert client.get_session_metadata.await_args_list == [
                 call(allocated_session_id),
                 call(allocated_session_id),
             ]
-            assert sessions == {"unrelated-session-id"}
+            assert attached == set()
+            assert sessions == (
+                {"unrelated-session-id", allocated_session_id} if retain_session else {"unrelated-session-id"}
+            )
             client.stop.assert_not_awaited()
     finally:
         await target.cleanup_target_async()
@@ -1688,17 +1822,14 @@ async def test_normalizer_cleans_up_partial_creation_async(
         and r.levelno == logging.INFO
         and r.getMessage().startswith("Retaining Copilot session ")
     ]
+    assert release.await_args_list == ([release_call, release_call] if retry_surface is not None else [release_call])
+    assert attached == set()
     if retain_session:
         client.delete_session.assert_not_awaited()
         assert sessions == {"unrelated-session-id", allocated_session_id}
         assert retained_logs == [f"Retaining Copilot session {allocated_session_id} as requested; delete it manually."]
     else:
-        expected_delete_attempts = (
-            [call(allocated_session_id), call(allocated_session_id)]
-            if retry_surface is not None
-            else [call(allocated_session_id)]
-        )
-        assert client.delete_session.await_args_list == expected_delete_attempts
+        client.rpc.sessions.close.assert_not_awaited()
         assert sessions == {"unrelated-session-id"}
         assert not retained_logs
 

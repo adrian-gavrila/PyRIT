@@ -13,7 +13,7 @@ from pyrit.common import get_non_required_value
 from pyrit.exceptions import EmptyResponseException
 from pyrit.models import ComponentIdentifier, Message, construct_response_from_request
 from pyrit.prompt_target.common.prompt_target import PromptTarget
-from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
+from pyrit.prompt_target.common.target_capabilities import CapabilityName, TargetCapabilities
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
 from pyrit.prompt_target.common.utils import limit_requests_per_minute
 
@@ -30,6 +30,7 @@ class _ConversationState:
     pending_session_id: str | None = None
     disconnect_error: BaseException | None = None
     retired: bool = False
+    retirement_reason: str | None = None
 
 
 class GitHubCopilotTarget(PromptTarget):
@@ -54,6 +55,7 @@ class GitHubCopilotTarget(PromptTarget):
         retain_session: bool = False,
         response_timeout_seconds: float = 60.0,
         max_requests_per_minute: int | None = None,
+        custom_configuration: TargetConfiguration | None = None,
     ) -> None:
         """
         Initialize the target with an explicit token or normal SDK login discovery.
@@ -72,10 +74,14 @@ class GitHubCopilotTarget(PromptTarget):
             max_requests_per_minute (int | None): PyRIT per-send pacing. Positive values delay each send by
                 60 / value seconds before SDK client creation, outside the response deadline.
                 None or nonpositive values disable pacing. Defaults to None.
+            custom_configuration (TargetConfiguration | None): Override the capability handling policy or
+                narrow the default capabilities. Capabilities the target does not implement are rejected.
+                Defaults to None for the target's native text-only configuration.
 
         Raises:
             ValueError: If model_name or a supplied github_token is blank, or response_timeout_seconds
-                is not finite and positive, or a supplied working_directory is blank, missing, or not a directory.
+                is not finite and positive, or a supplied working_directory is blank, missing, or not a directory,
+                or custom_configuration adds a capability or modality the target does not implement.
             OSError: If the working directory cannot be resolved or inspected.
             RuntimeError: If the optional GitHub Copilot SDK is not installed.
         """
@@ -85,6 +91,20 @@ class GitHubCopilotTarget(PromptTarget):
             raise ValueError("github_token must not be blank when supplied.")
         if not math.isfinite(response_timeout_seconds) or response_timeout_seconds <= 0:
             raise ValueError("response_timeout_seconds must be a finite positive number.")
+        if custom_configuration is not None:
+            native = self._DEFAULT_CONFIGURATION.capabilities
+            requested = custom_configuration.capabilities
+            unsupported = [
+                capability.value
+                for capability in CapabilityName
+                if requested.includes(capability=capability) and not native.includes(capability=capability)
+            ]
+            if not requested.input_modalities <= native.input_modalities:
+                unsupported.append("input_modalities")
+            if not requested.output_modalities <= native.output_modalities:
+                unsupported.append("output_modalities")
+            if unsupported:
+                raise ValueError(f"GitHubCopilotTarget does not implement: {', '.join(unsupported)}.")
         resolved_github_token = (
             get_non_required_value(
                 env_var_name=self.GITHUB_TOKEN_ENVIRONMENT_VARIABLE,
@@ -107,7 +127,11 @@ class GitHubCopilotTarget(PromptTarget):
         except ModuleNotFoundError as e:
             raise RuntimeError("Could not import copilot. Install it with 'pip install pyrit[github-copilot]'.") from e
 
-        super().__init__(model_name=model_name, max_requests_per_minute=max_requests_per_minute)
+        super().__init__(
+            model_name=model_name,
+            max_requests_per_minute=max_requests_per_minute,
+            custom_configuration=custom_configuration,
+        )
         self._sdk = copilot
         self._github_token = resolved_github_token
         self._retain_session = retain_session
@@ -178,7 +202,12 @@ class GitHubCopilotTarget(PromptTarget):
                         session=session,
                         prompt=request.converted_value,
                     )
+                except EmptyResponseException:
+                    # The SDK reached session idle without an error, so the native history still
+                    # matches memory and the conversation can continue.
+                    raise
                 except BaseException as send_error:
+                    conversation.retirement_reason = repr(send_error)
                     retirement_task = asyncio.create_task(self._retire_conversation_async(conversation=conversation))
                     try:
                         await asyncio.shield(retirement_task)
@@ -263,15 +292,13 @@ class GitHubCopilotTarget(PromptTarget):
 
         Unknown or already released conversations are no-ops. Established conversations
         become retired before release, so a later send cannot silently create a new native
-        history for the same PyRIT conversation ID. A failed retained-session disconnect
-        remains unconfirmed on subsequent resets.
+        history for the same PyRIT conversation ID.
 
         Args:
             conversation_id (str): The PyRIT conversation ID to release.
 
         Raises:
             asyncio.CancelledError: If the caller is cancelled while waiting for cleanup.
-            RuntimeError: If a previous retained-session disconnect failed.
         """
         async with self._lifecycle_condition:
             conversation = self._conversations.get(conversation_id)
@@ -322,9 +349,14 @@ class GitHubCopilotTarget(PromptTarget):
         async with self._lifecycle_condition:
             conversation = self._conversations[conversation_id]
             if conversation.retired:
+                cause = (
+                    f" after a failed send: {conversation.retirement_reason}"
+                    if conversation.retirement_reason is not None
+                    else ""
+                )
                 raise RuntimeError(
-                    f"Copilot conversation {conversation_id} was retired and cannot accept further sends; "
-                    "use a new conversation ID."
+                    f"Copilot conversation {conversation_id} was retired{cause}; "
+                    "it cannot accept further sends, so use a new conversation ID."
                 )
             existing_session = conversation.session
         if existing_session is not None:
@@ -446,6 +478,9 @@ class GitHubCopilotTarget(PromptTarget):
         if await client.get_session_metadata(session_id) is None:
             return
         if self._retain_session:
+            from copilot.generated.rpc import SessionsCloseRequest
+
+            await client.rpc.sessions.close(SessionsCloseRequest(session_id=session_id))
             logger.info("Retaining Copilot session %s as requested; delete it manually.", session_id)
         else:
             await client.delete_session(session_id)
@@ -471,9 +506,12 @@ class GitHubCopilotTarget(PromptTarget):
         session_id = session.session_id
         if self._retain_session:
             if conversation.disconnect_error is not None:
-                raise RuntimeError(
-                    f"Copilot session {session_id} release remains unconfirmed after a failed disconnect."
-                ) from conversation.disconnect_error
+                logger.warning(
+                    "Copilot session %s release remains unconfirmed after a failed disconnect.",
+                    session_id,
+                    exc_info=conversation.disconnect_error,
+                )
+                return
             try:
                 await session.disconnect()
             except BaseException as error:

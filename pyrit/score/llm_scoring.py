@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import uuid
 from string import Formatter
 from typing import TYPE_CHECKING, cast
@@ -51,6 +52,8 @@ if TYPE_CHECKING:
     )
     from pyrit.prompt_target import PromptTarget
     from pyrit.score.response_handler import ResponseHandler
+
+logger = logging.getLogger(__name__)
 
 
 def _format_string_references_message_piece(template: str | None) -> bool:
@@ -324,9 +327,11 @@ async def _run_llm_scoring_async(
                         current_task = asyncio.current_task()
                         if current_task is not None and current_task.cancelling():
                             raise asyncio.CancelledError from cleanup_error
-                        raise RuntimeError(
-                            "Could not release the fresh judge session; refusing to continue scoring."
-                        ) from cleanup_error
+                        logger.warning(
+                            "Could not release fresh judge session %s.",
+                            attempt_conversation_id,
+                            exc_info=cleanup_error,
+                        )
 
             unvalidated_score: UnvalidatedScore = await _fresh_attempt_async()
         else:

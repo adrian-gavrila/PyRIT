@@ -307,18 +307,9 @@ class SelfAskTrueFalseScorer(MessageTrueFalseScorer):
                 The category is configured from the TrueFalseQuestionPath.
                 The score_value is True or False based on which description fits best.
                 Metadata can be configured to provide additional information.
-
-        Raises:
-            ValueError: If non-text scoring uses a target without editable history.
         """
         # Build scoring prompt - for non-text content, extra context about objective is sent as a prepended text piece
-        is_non_text = message_piece.converted_value_data_type != "text"
-        if is_non_text and not self._prompt_target.capabilities.supports_editable_history:
-            raise ValueError(
-                "non-text scoring requires editable history; fresh-conversation retries support text only."
-            )
-
-        if is_non_text:
+        if message_piece.converted_value_data_type != "text":
             prepended_text = f"objective: {objective}\nresponse:"
             scoring_value = message_piece.converted_value
             scoring_data_type = message_piece.converted_value_data_type
@@ -338,7 +329,7 @@ class SelfAskTrueFalseScorer(MessageTrueFalseScorer):
             judgment_replay_identifier=self._get_judgment_replay_identifier(),
             prepended_text=prepended_text,
             category=self._score_category,
-            fresh_conversation_per_attempt=scoring_data_type == "text",
+            fresh_conversation_per_attempt=True,
         )
 
         return [self._convert_score(unvalidated_score)]
