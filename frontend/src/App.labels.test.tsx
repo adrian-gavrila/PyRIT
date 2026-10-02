@@ -35,6 +35,9 @@ jest.mock('@/utils/conversationExport', () => ({
 }))
 
 jest.mock('@/services/api', () => ({
+  runtimeApi: {
+    getReadiness: jest.fn().mockResolvedValue({ ready: true, state: 'ready', generation: '' }),
+  },
   authApi: { getAccess: jest.fn().mockResolvedValue({ isAdmin: false }) },
   versionApi: { getVersion: jest.fn() },
   labelsApi: { getLabels: jest.fn() },
@@ -74,7 +77,14 @@ const SCENARIO: RegisteredScenario = {
   include_baseline_by_default: false,
   supported_parameters: [],
   uses_default_adversarial_target: false,
-  default_run_size: { estimated_attack_count: 1, components: [], datasets: [], note: null },
+  default_run_size: {
+    dataset_size: { kind: 'bounded', value: 1 },
+    dataset_limit: { state: 'scenario_default' },
+    estimated_attack_count: 1,
+    components: [],
+    datasets: [],
+    note: null,
+  },
 }
 const TARGET = makeTarget({ target_registry_name: 'test_target', identifier_hash: 'test_hash' })
 const DEFAULT_LABELS = { operator: 'config_user', operation: 'config_op', team: 'config_team' }

@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, NonCallableMagicMock, call, create_autospec
 from uuid import UUID, uuid4
 
 import pytest
-from unit.mocks import store_message
+from unit.mocks import store_message_async
 
 from pyrit.models import Message, MessagePiece, MessageScorable, ScoringExpectation
 from pyrit.prompt_normalizer import PromptNormalizer
@@ -133,7 +133,9 @@ async def _send_normalized_async(
     )
 
 
-def _message_state(*, memory: MemoryInterface, conversation_id: str) -> list[tuple[str, str, str, str | None, str]]:
+async def _message_state_async(
+    *, memory: MemoryInterface, conversation_id: str
+) -> list[tuple[str, str, str, str | None, str]]:
     return [
         (
             message.get_piece().role,
@@ -142,21 +144,23 @@ def _message_state(*, memory: MemoryInterface, conversation_id: str) -> list[tup
             message.get_piece().conversation_id,
             message.get_piece().response_error,
         )
-        for message in memory.get_conversation_messages(conversation_id=conversation_id)
+        for message in await memory.get_conversation_messages_async(conversation_id=conversation_id)
     ]
 
 
-def _message_roles_and_errors(*, memory: MemoryInterface, conversation_id: str) -> list[tuple[str, str]]:
+async def _message_roles_and_errors_async(*, memory: MemoryInterface, conversation_id: str) -> list[tuple[str, str]]:
     return [
         (message.get_piece().role, message.get_piece().response_error)
-        for message in memory.get_conversation_messages(conversation_id=conversation_id)
+        for message in await memory.get_conversation_messages_async(conversation_id=conversation_id)
     ]
 
 
-def _message_values_and_errors(*, memory: MemoryInterface, conversation_id: str) -> list[tuple[str, str, str]]:
+async def _message_values_and_errors_async(
+    *, memory: MemoryInterface, conversation_id: str
+) -> list[tuple[str, str, str]]:
     return [
         (message.get_piece().role, message.get_piece().converted_value, message.get_piece().response_error)
-        for message in memory.get_conversation_messages(conversation_id=conversation_id)
+        for message in await memory.get_conversation_messages_async(conversation_id=conversation_id)
     ]
 
 
@@ -216,7 +220,7 @@ async def test_normalizer_round_trip_and_retention_async(
         await target.cleanup_target_async()
 
     assert response.get_piece().converted_value == "HELLO"
-    assert _message_state(memory=sqlite_instance, conversation_id=conversation_id) == [
+    assert await _message_state_async(memory=sqlite_instance, conversation_id=conversation_id) == [
         ("user", "Original text before conversion.", "Reply exactly HELLO.", conversation_id, "none"),
         ("assistant", "HELLO", "HELLO", conversation_id, "none"),
     ]
@@ -269,7 +273,7 @@ async def test_normalizer_continues_native_session_across_turns_async(
     target = GitHubCopilotTarget(model_name="gpt-5-mini")
 
     if initial_system_prompt is not None:
-        target.set_system_prompt(system_prompt=initial_system_prompt, conversation_id=conversation_id)
+        await target.set_system_prompt_async(system_prompt=initial_system_prompt, conversation_id=conversation_id)
 
     first_response = await _send_normalized_async(
         target=target,
@@ -297,7 +301,9 @@ async def test_normalizer_continues_native_session_across_turns_async(
     )
     if initial_system_prompt is not None:
         with pytest.raises(RuntimeError, match="Conversation already exists"):
-            target.set_system_prompt(system_prompt="different system instructions", conversation_id=conversation_id)
+            await target.set_system_prompt_async(
+                system_prompt="different system instructions", conversation_id=conversation_id
+            )
 
     second_response = await _send_normalized_async(
         target=target,
@@ -319,7 +325,7 @@ async def test_normalizer_continues_native_session_across_turns_async(
     ]
     if initial_system_prompt is not None:
         expected_messages.insert(0, ("system", initial_system_prompt, initial_system_prompt, conversation_id, "none"))
-    assert _message_state(memory=sqlite_instance, conversation_id=conversation_id) == expected_messages
+    assert await _message_state_async(memory=sqlite_instance, conversation_id=conversation_id) == expected_messages
     _assert_no_resource_release(client=client)
     await target.cleanup_target_async()
     client.delete_session.assert_awaited_once_with(session.session_id)
@@ -428,7 +434,7 @@ async def test_reset_conversation_releases_only_requested_session_async(
         conversation_id="conversation-b",
     )
     memory_before_reset = {
-        conversation_id: _message_values_and_errors(memory=sqlite_instance, conversation_id=conversation_id)
+        conversation_id: await _message_values_and_errors_async(memory=sqlite_instance, conversation_id=conversation_id)
         for conversation_id in ("conversation-a", "conversation-b")
     }
 
@@ -437,7 +443,7 @@ async def test_reset_conversation_releases_only_requested_session_async(
     _assert_no_resource_release(client=client)
     session_b.disconnect.assert_not_awaited()
     memory_after_reset = {
-        conversation_id: _message_values_and_errors(memory=sqlite_instance, conversation_id=conversation_id)
+        conversation_id: await _message_values_and_errors_async(memory=sqlite_instance, conversation_id=conversation_id)
         for conversation_id in ("conversation-a", "conversation-b")
     }
     assert memory_after_reset == memory_before_reset
@@ -923,13 +929,13 @@ async def test_normalizer_rejects_retired_conversation_but_allows_fresh_async(
         conversation_id=conversation_b,
     )
     assert response_b.get_piece().converted_value == "FRESH"
-    assert _message_roles_and_errors(memory=sqlite_instance, conversation_id=conversation_a) == [
+    assert await _message_roles_and_errors_async(memory=sqlite_instance, conversation_id=conversation_a) == [
         ("user", "none"),
         ("assistant", "processing"),
         ("user", "none"),
         ("assistant", "processing"),
     ]
-    assert _message_values_and_errors(memory=sqlite_instance, conversation_id=conversation_b) == [
+    assert await _message_values_and_errors_async(memory=sqlite_instance, conversation_id=conversation_b) == [
         ("user", "fresh prepared", "none"),
         ("assistant", "FRESH", "none"),
     ]
@@ -987,7 +993,7 @@ async def test_self_ask_true_false_uses_fresh_copilot_session_after_unusable_rep
     client.delete_session.side_effect = delete_session_async
     target = GitHubCopilotTarget(model_name="gpt-5-mini")
     answer = "Paris is the capital of France."
-    saved_answer = store_message(
+    saved_answer = await store_message_async(
         MessagePiece(
             role="assistant",
             conversation_id=str(uuid4()),
@@ -1439,7 +1445,7 @@ async def test_normalizer_surfaces_lifecycle_failures_async(
         session.send_and_wait.assert_awaited_once()
         client.delete_session.assert_awaited_once_with("sdk-session-id")
         client.stop.assert_awaited_once()
-        assert _message_roles_and_errors(memory=sqlite_instance, conversation_id=conversation_id) == [
+        assert await _message_roles_and_errors_async(memory=sqlite_instance, conversation_id=conversation_id) == [
             ("user", "none"),
             ("assistant", "none"),
         ]
@@ -1459,7 +1465,7 @@ async def test_normalizer_surfaces_lifecycle_failures_async(
         )
 
     assert exc_info.value.__cause__ is error
-    assert _message_roles_and_errors(memory=sqlite_instance, conversation_id=conversation_id) == [
+    assert await _message_roles_and_errors_async(memory=sqlite_instance, conversation_id=conversation_id) == [
         ("user", "none"),
         ("assistant", "processing"),
     ]
@@ -1546,7 +1552,7 @@ async def test_normalizer_rejects_invalid_reply_async(
         )
     assert isinstance(exc_info.value.__cause__, ValueError)
 
-    assert _message_roles_and_errors(memory=sqlite_instance, conversation_id=conversation_id) == [
+    assert await _message_roles_and_errors_async(memory=sqlite_instance, conversation_id=conversation_id) == [
         ("user", "none"),
         ("assistant", "processing"),
     ]
@@ -1595,7 +1601,7 @@ async def test_empty_reply_keeps_native_conversation_async(
 
     assert empty_response.get_piece().converted_value == ""
     assert response.get_piece().converted_value == "HELLO"
-    assert _message_roles_and_errors(memory=sqlite_instance, conversation_id=conversation_id) == [
+    assert await _message_roles_and_errors_async(memory=sqlite_instance, conversation_id=conversation_id) == [
         ("user", "none"),
         ("assistant", "empty"),
         ("user", "none"),
@@ -1679,7 +1685,7 @@ async def test_normalizer_rejects_unsafe_events_async(
         )
     assert isinstance(exc_info.value.__cause__, RuntimeError)
     assert expected_error in str(exc_info.value.__cause__).lower()
-    assert _message_roles_and_errors(memory=sqlite_instance, conversation_id=conversation_id) == [
+    assert await _message_roles_and_errors_async(memory=sqlite_instance, conversation_id=conversation_id) == [
         ("user", "none"),
         ("assistant", "processing"),
     ]
@@ -1763,7 +1769,7 @@ async def test_normalizer_cleans_up_partial_creation_async(
     session.send_and_wait.assert_not_awaited()
     session.send.assert_not_awaited()
     client.stop.assert_not_awaited()
-    assert _message_roles_and_errors(memory=sqlite_instance, conversation_id=conversation_id) == [
+    assert await _message_roles_and_errors_async(memory=sqlite_instance, conversation_id=conversation_id) == [
         ("user", "none"),
         ("assistant", "processing"),
     ]
@@ -1784,7 +1790,7 @@ async def test_normalizer_cleans_up_partial_creation_async(
         assert release.await_args_list == [release_call]
         session.send_and_wait.assert_not_awaited()
         session.send.assert_not_awaited()
-        assert _message_roles_and_errors(memory=sqlite_instance, conversation_id=conversation_id) == [
+        assert await _message_roles_and_errors_async(memory=sqlite_instance, conversation_id=conversation_id) == [
             ("user", "none"),
             ("assistant", "processing"),
             ("user", "none"),
@@ -1882,7 +1888,7 @@ async def test_normalizer_reports_partial_creation_cleanup_retry_failure_async(
     session = client.create_session.return_value
     session.send_and_wait.assert_not_awaited()
     session.send.assert_not_awaited()
-    assert _message_roles_and_errors(memory=sqlite_instance, conversation_id=conversation_id) == [
+    assert await _message_roles_and_errors_async(memory=sqlite_instance, conversation_id=conversation_id) == [
         ("user", "none"),
         ("assistant", "processing"),
     ]
