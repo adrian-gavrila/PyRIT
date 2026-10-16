@@ -1,4 +1,4 @@
-import { retryAfterMilliseconds, toApiError } from './errors'
+import { conflictingOperation, operationInUse, retryAfterMilliseconds, toApiError } from './errors'
 import type { ApiError } from './errors'
 
 // ---------------------------------------------------------------------------
@@ -31,6 +31,28 @@ function makeAxiosError(opts: {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+describe('Operation conflicts', () => {
+  const OPERATION = { id: 'op-1', name: 'Engagement', created_at: '2026-10-06T20:00:00Z' }
+  const USAGE = { findings: 1, attacks: 2, scenario_runs: 0 }
+
+  it('should read the record or usage from a structured 409 detail', () => {
+    expect(conflictingOperation(makeAxiosError({ status: 409, data: { detail: { operation: OPERATION } } })))
+      .toEqual(OPERATION)
+    expect(operationInUse(makeAxiosError({ status: 409, data: { detail: { message: 'in use', usage: USAGE } } })))
+      .toEqual(USAGE)
+  })
+
+  it.each([
+    makeAxiosError({ status: 404, data: { detail: { usage: USAGE } } }),
+    makeAxiosError({ status: 409, data: { detail: 'Operation is in use.' } }),
+    makeAxiosError({ status: 409, data: { detail: { usage: { ...USAGE, attacks: '2' } } } }),
+    makeAxiosError({ status: 409, data: { detail: { operation: OPERATION } } }),
+    new Error('Network'),
+  ])('should ignore responses without valid usage: %#', (cause: unknown) => {
+    expect(operationInUse(cause)).toBeNull()
+  })
+})
 
 describe('retryAfterMilliseconds', () => {
   it('should honor the busy response cooldown and HTTP-date form', () => {

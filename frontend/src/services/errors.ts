@@ -1,19 +1,28 @@
 import type { AxiosError } from 'axios'
 
-import type { Operation } from '@/types'
+import type { Operation, OperationUsage } from '@/types'
 
 export function conflictingOperation(cause: unknown): Operation | null {
-  if (!isAxiosError(cause) || cause.response?.status !== 409) return null
-  const data: unknown = cause.response.data
-  if (typeof data !== 'object' || data === null || !('detail' in data)) return null
-  const detail = data.detail
-  if (typeof detail !== 'object' || detail === null || !('operation' in detail)) return null
+  const detail = conflictDetail(cause)
+  if (!detail || !('operation' in detail)) return null
   const operation = detail.operation
   if (typeof operation !== 'object' || operation === null
     || !('id' in operation) || typeof operation.id !== 'string'
     || !('name' in operation) || typeof operation.name !== 'string'
     || !('created_at' in operation) || typeof operation.created_at !== 'string') return null
   return { id: operation.id, name: operation.name, created_at: operation.created_at }
+}
+
+/** The usage that kept an Operation from being deleted, from a 409 response. */
+export function operationInUse(cause: unknown): OperationUsage | null {
+  const detail = conflictDetail(cause)
+  if (!detail || !('usage' in detail)) return null
+  const usage = detail.usage
+  if (typeof usage !== 'object' || usage === null
+    || !('findings' in usage) || typeof usage.findings !== 'number'
+    || !('attacks' in usage) || typeof usage.attacks !== 'number'
+    || !('scenario_runs' in usage) || typeof usage.scenario_runs !== 'number') return null
+  return { findings: usage.findings, attacks: usage.attacks, scenario_runs: usage.scenario_runs }
 }
 
 /**
@@ -139,6 +148,14 @@ export function retryAfterMilliseconds(error: unknown): number {
 /** Type-guard for Axios errors. */
 function isAxiosError(err: unknown): err is AxiosError {
   return typeof err === 'object' && err !== null && (err as AxiosError).isAxiosError === true
+}
+
+/** The structured `detail` of a 409 response, such as the record that caused the conflict. */
+function conflictDetail(cause: unknown): object | null {
+  if (!isAxiosError(cause) || cause.response?.status !== 409) return null
+  const data: unknown = cause.response.data
+  if (typeof data !== 'object' || data === null || !('detail' in data)) return null
+  return typeof data.detail === 'object' && data.detail !== null ? data.detail : null
 }
 
 /**
