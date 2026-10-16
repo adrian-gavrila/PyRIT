@@ -73,8 +73,7 @@ export default function OperationEditDialog({ operation, onSaved }: OperationEdi
               {existing && <MessageBar intent="warning" aria-live="polite"><MessageBarBody>
                 Another operation is already named “{existing.name}”. Choose a different name.
               </MessageBarBody></MessageBar>}
-              <Field label="Name" required
-                hint="Unique, ignoring case and surrounding spaces. Saved analytics views and configured names that use the old name stop matching.">
+              <Field label="Name" required hint="Unique, ignoring case.">
                 <Input className={styles.input} value={name} disabled={saving} maxLength={128}
                   name="operation-name" autoComplete="off"
                   onChange={(_, data) => { setName(data.value); setExisting(null) }} />

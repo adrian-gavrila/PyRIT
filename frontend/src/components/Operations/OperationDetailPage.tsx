@@ -197,9 +197,7 @@ function OperationDetailContent({ operationId, onOperationChanged }: { operation
             onOperationChanged?.()
           }} />
           <OperationDeleteDialog operation={current.operation}
-            onUsageChanged={usage => {
-              setOperationState({ key: operationKey, status: 'loaded', operation: { ...current.operation, usage } })
-            }}
+            onInUse={() => { setRevision(value => value + 1) }}
             onDeleted={() => {
               onOperationChanged?.()
               void navigate('/operations')

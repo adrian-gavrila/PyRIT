@@ -149,22 +149,22 @@ it.each([
   expect(operationsApi.delete).not.toHaveBeenCalled()
 })
 
-it('shows the counts and disables deletion when the operation came into use after loading', async () => {
+it('refetches the counts and disables deletion when the operation came into use after loading', async () => {
   const user = userEvent.setup()
-  jest.mocked(operationsApi.delete).mockRejectedValueOnce(conflict({
-    message: 'in use', usage: { findings: 0, attacks: 2, scenario_runs: 0 },
-  }))
+  jest.mocked(operationsApi.delete).mockRejectedValueOnce(conflict({ message: 'in use' }))
   renderPage()
   await user.click(await screen.findByRole('button', { name: 'Delete' }))
   const dialog = screen.getByRole('dialog', { name: 'Delete operation?' })
+  jest.mocked(operationsApi.get).mockResolvedValue({ ...OPERATION, usage: { findings: 0, attacks: 2, scenario_runs: 0 } })
   await user.click(within(dialog).getByRole('button', { name: 'Delete operation' }))
-  const reason = 'Has 2 linked attacks or runs. Only empty operations can be deleted.'
-  expect(await within(dialog).findByText(reason)).toBeInTheDocument()
-  expect(within(dialog).getByRole('button', { name: 'Delete operation' })).toHaveAttribute('aria-disabled', 'true')
+  expect(await within(dialog).findByText(/no longer empty/)).toBeInTheDocument()
+  await waitFor(() => {
+    expect(within(dialog).getByRole('button', { name: 'Delete operation' })).toHaveAttribute('aria-disabled', 'true')
+  })
   await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
   const remove = await screen.findByRole('button', { name: 'Delete' })
   expect(remove).toHaveAttribute('aria-disabled', 'true')
-  expect(remove).toHaveAccessibleDescription(reason)
+  expect(remove).toHaveAccessibleDescription('Has 2 linked attacks or runs. Only empty operations can be deleted.')
   expect(screen.getByRole('heading', { level: 1, name: OPERATION.name })).toBeInTheDocument()
 })
 

@@ -5,13 +5,14 @@ import {
 } from '@fluentui/react-components'
 
 import { operationsApi } from '@/services/api'
-import { operationInUse, toApiError } from '@/services/errors'
+import { toApiError } from '@/services/errors'
 import type { OperationDetail, OperationUsage } from '@/types'
 import { useOperationsStyles } from './Operations.styles'
 
 interface OperationDeleteDialogProps {
   operation: OperationDetail
-  onUsageChanged: (usage: OperationUsage) => void
+  /** Called when the server refuses because something now refers to the Operation. */
+  onInUse: () => void
   onDeleted: () => void
 }
 
@@ -28,7 +29,7 @@ function deleteBlockedReason({ findings, attacks, scenario_runs: runs }: Operati
   return parts.length > 0 ? `Has ${parts.join(' and ')}. Only empty operations can be deleted.` : undefined
 }
 
-export default function OperationDeleteDialog({ operation, onUsageChanged, onDeleted }: OperationDeleteDialogProps) {
+export default function OperationDeleteDialog({ operation, onInUse, onDeleted }: OperationDeleteDialogProps) {
   const styles = useOperationsStyles()
   const [open, setOpen] = useState(false)
   const [error, setError] = useState('')
@@ -46,9 +47,9 @@ export default function OperationDeleteDialog({ operation, onUsageChanged, onDel
       setOpen(false)
       onDeleted()
     } catch (cause: unknown) {
-      const usage = operationInUse(cause)
-      if (usage) onUsageChanged(usage)
-      setError((usage && deleteBlockedReason(usage)) || toApiError(cause).detail)
+      const apiError = toApiError(cause)
+      if (apiError.status === 409) onInUse()
+      setError(apiError.status === 409 ? 'This operation is no longer empty, so it can’t be deleted.' : apiError.detail)
     } finally {
       submitting.current = false
       setDeleting(false)

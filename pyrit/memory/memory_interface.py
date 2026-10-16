@@ -45,6 +45,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from sqlalchemy.orm import joinedload
 from sqlalchemy.orm.attributes import InstrumentedAttribute, flag_modified
+from sqlalchemy.orm.exc import StaleDataError
 from sqlalchemy.orm.session import Session
 
 from pyrit.common.async_compatibility import legacy_sync_override, run_legacy_sync_async
@@ -228,24 +229,6 @@ def _check_operation_name_change(*, existing: AttackResultEntry | ScenarioResult
     print_deprecation_message(
         old_item="Changing the Operation name of saved activity", new_item="operation_id", removed_in="1.4.0"
     )
-
-
-async def _count_operation_usage_async(*, session: AsyncSession, operation_id: uuid.UUID) -> OperationUsage:
-    """
-    Count what refers to an Operation by ID in one indexed query.
-
-    Returns:
-        OperationUsage: The finding, attack, and scenario run counts.
-    """
-    counts = [
-        select(func.count()).select_from(table).where(table.operation_id == operation_id).scalar_subquery().label(field)
-        for field, table in (
-            ("findings", FindingEntry),
-            ("attacks", AttackResultEntry),
-            ("scenario_runs", ScenarioResultEntry),
-        )
-    ]
-    return OperationUsage.model_validate(dict((await session.execute(select(*counts))).one()._mapping))
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -722,7 +705,6 @@ class MemoryInterface(abc.ABC):
         Raises:
             LookupError: If the Operation does not exist.
             IntegrityError: If the update fails for a reason other than a taken name.
-            RuntimeError: If the database does not return a cursor result.
         """
         changes = {key: value for key, value in {"name": name, "description": description}.items() if value is not None}
         try:
@@ -731,20 +713,13 @@ class MemoryInterface(abc.ABC):
                 if entry is None:
                     raise LookupError(f"Operation {operation_id} not found")
                 updated = Operation.model_validate(entry.get_operation().model_dump() | changes)
-                result = await session.execute(
-                    update(OperationEntry)
-                    .where(OperationEntry.id == operation_id)
-                    .values(
-                        name=updated.name, name_key=operation_name_key(updated.name), description=updated.description
-                    )
-                    .execution_options(synchronize_session=False)
-                )
-                if not isinstance(result, CursorResult):
-                    raise RuntimeError("Operation update did not return a database cursor result.")
-                # A concurrent delete can land between the read and the update.
-                if result.rowcount == 0:
-                    raise LookupError(f"Operation {operation_id} not found")
-                return updated
+                entry.name, entry.name_key = updated.name, operation_name_key(updated.name)
+                entry.description = updated.description
+                await session.flush()
+                return entry.get_operation()
+        except StaleDataError as exc:
+            # A concurrent delete landed between the read and the update.
+            raise LookupError(f"Operation {operation_id} not found") from exc
         except IntegrityError:
             existing = await self.get_operations_async(name=name) if name is not None else []
             if not existing:
@@ -753,13 +728,25 @@ class MemoryInterface(abc.ABC):
 
     async def get_operation_usage_async(self, *, operation_id: uuid.UUID) -> OperationUsage:
         """
-        Count the findings, attacks, and scenario runs that refer to an Operation by ID.
+        Count the findings, attacks, and scenario runs that refer to an Operation by ID, in one indexed query.
 
         Returns:
             OperationUsage: The counts, which are all zero for an unknown ID.
         """
+        counts = [
+            select(func.count())
+            .select_from(table)
+            .where(table.operation_id == operation_id)
+            .scalar_subquery()
+            .label(field)
+            for field, table in (
+                ("findings", FindingEntry),
+                ("attacks", AttackResultEntry),
+                ("scenario_runs", ScenarioResultEntry),
+            )
+        ]
         async with await self.get_session_async() as session:
-            return await _count_operation_usage_async(session=session, operation_id=operation_id)
+            return OperationUsage.model_validate(dict((await session.execute(select(*counts))).one()._mapping))
 
     async def delete_operation_async(self, *, operation_id: uuid.UUID) -> None:
         """
@@ -790,12 +777,12 @@ class MemoryInterface(abc.ABC):
                     return
                 if await session.get(OperationEntry, operation_id) is None:
                     raise LookupError(f"Operation {operation_id} not found")
-                usage = await _count_operation_usage_async(session=session, operation_id=operation_id)
-                raise OperationInUseError(operation_id=operation_id, usage=usage)
         except IntegrityError as exc:
             # SQL Server's foreign keys reject the delete when a reference commits while it runs.
             usage = await self.get_operation_usage_async(operation_id=operation_id)
             raise OperationInUseError(operation_id=operation_id, usage=usage) from exc
+        usage = await self.get_operation_usage_async(operation_id=operation_id)
+        raise OperationInUseError(operation_id=operation_id, usage=usage)
 
     async def resolve_operation_id_async(
         self, *, operation_id: uuid.UUID | str | None, operation_name: str | None = None
@@ -845,10 +832,7 @@ class MemoryInterface(abc.ABC):
                 session.add(entry)
                 await session.flush()
                 # Checked after the insert so the write lock is held; SQLite does not enforce the foreign key.
-                if (
-                    await session.scalar(select(OperationEntry.id).where(OperationEntry.id == finding.operation_id))
-                    is None
-                ):
+                if await session.get(OperationEntry, finding.operation_id) is None:
                     raise LookupError(f"Operation {finding.operation_id} not found")
                 if evidence is not None:
                     session.add(FindingEvidenceEntry(evidence))
