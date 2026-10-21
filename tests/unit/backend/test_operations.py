@@ -147,6 +147,15 @@ def test_findings_are_created_and_listed_under_an_operation(compatibility_header
     assert counts == {"Case": {"informational": 1}, "Other": {"low": 1}}
 
 
+def test_findings_list_highest_severity_first(compatibility_headers: dict[str, str]) -> None:
+    client = TestClient(app, headers=compatibility_headers)
+    operation_id = client.post("/api/operations", json={"name": "Sorted"}).json()["id"]
+    for title, severity in [("First", "critical"), ("Second", "low")]:
+        client.post(f"/api/operations/{operation_id}/findings", json={"title": title, "severity": severity})
+    listed = client.get(f"/api/operations/{operation_id}/findings", params={"limit": 20}).json()["items"]
+    assert [item["title"] for item in listed] == ["First", "Second"]
+
+
 def test_finding_options_exposes_canonical_harm_types(compatibility_headers: dict[str, str]) -> None:
     client = TestClient(app, headers=compatibility_headers)
     response = client.get("/api/operations/finding-options")

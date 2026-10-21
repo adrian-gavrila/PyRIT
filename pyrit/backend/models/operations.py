@@ -12,7 +12,6 @@ from pyrit.models import (
     Finding,
     FindingCreate,
     FindingEvidence,
-    FindingSeverity,
     Operation,
     OperationUsage,
 )
@@ -27,9 +26,9 @@ class FindingOptionsResponse(BaseModel):
 
 
 class OperationListItem(Operation):
-    """An operation with its finding counts by severity. Severities with no findings are omitted."""
+    """An operation with its finding counts by stored severity value. Severities with no findings are omitted."""
 
-    finding_counts: dict[FindingSeverity, int]
+    finding_counts: dict[str, int]
 
 
 class OperationListResponse(BaseModel):

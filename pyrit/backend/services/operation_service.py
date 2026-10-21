@@ -25,6 +25,7 @@ from pyrit.models import (
     Finding,
     FindingCreate,
     FindingEvidence,
+    FindingSeverity,
     Operation,
     OperationCreate,
 )
@@ -196,7 +197,11 @@ class OperationService:
         """
         await self.get_async(operation_id)
         findings = await CentralMemory.get_memory_instance().get_findings_async(
-            operation_id=operation_id, limit=limit + 1, offset=offset, title_query=title_query
+            operation_id=operation_id,
+            limit=limit + 1,
+            offset=offset,
+            title_query=title_query,
+            severity_order=[severity.value for severity in FindingSeverity],
         )
         has_more = len(findings) > limit
         page = findings[:limit]
@@ -269,7 +274,11 @@ class OperationService:
         """
         await self.get_async(operation_id)
         memory = CentralMemory.get_memory_instance()
-        findings = await memory.get_findings_by_ids_async(operation_id=operation_id, finding_ids=finding_ids)
+        findings = await memory.get_findings_by_ids_async(
+            operation_id=operation_id,
+            finding_ids=finding_ids,
+            severity_order=[severity.value for severity in FindingSeverity],
+        )
         found = {finding.id for finding in findings}
         missing = next((finding_id for finding_id in finding_ids if finding_id not in found), None)
         if missing is not None:

@@ -543,7 +543,7 @@ async def test_report_matches_the_dashboard_listing_order(sqlite_instance: SQLit
         )
         for index, severity in enumerate(["low", "critical", "moderate", "critical"])
     ]
-    dashboard = await sqlite_instance.get_findings_async(operation_id=operation.id, limit=10)
+    dashboard = (await OperationService().list_findings_async(operation_id=operation.id, limit=10, offset=0)).items
 
     report = await _report_async(operation_id=operation.id, finding_ids=[finding.id for finding in findings])
 

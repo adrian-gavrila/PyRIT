@@ -24,10 +24,12 @@ from pyrit.memory.memory_models import (
     PromptMemoryEntry,
     ScoreEntry,
 )
-from pyrit.models import Finding, FindingCreate, FindingEvidence, FindingSeverity, Operation
+from pyrit.models import Finding, FindingCreate, FindingEvidence, Operation
 from pyrit.models.harm_category import HarmCategory
 
 pytestmark = pytest.mark.usefixtures("patch_central_database")
+
+SEVERITY_ORDER = ["critical", "important", "moderate", "low", "informational"]
 
 
 async def test_operations_are_unique_by_trimmed_case_folded_name(sqlite_instance: SQLiteMemory) -> None:
@@ -164,8 +166,10 @@ async def test_findings_paginate_within_one_operation(sqlite_instance: SQLiteMem
             )
         )
     await sqlite_instance.add_finding_async(finding=Finding(operation_id=other.id, title="Other", severity="critical"))
-    first = await sqlite_instance.get_findings_async(operation_id=operation.id, limit=2)
-    second = await sqlite_instance.get_findings_async(operation_id=operation.id, limit=2, offset=2)
+    first = await sqlite_instance.get_findings_async(operation_id=operation.id, limit=2, severity_order=SEVERITY_ORDER)
+    second = await sqlite_instance.get_findings_async(
+        operation_id=operation.id, limit=2, offset=2, severity_order=SEVERITY_ORDER
+    )
     assert [finding.title for finding in first + second] == ["3", "2", "1", "4"]
     async with await sqlite_instance.get_session_async() as session:
         for table in [AttackResultEntry, PromptMemoryEntry, ScoreEntry]:
@@ -218,7 +222,10 @@ async def test_update_finding_preserves_identity_and_reorders_severity(sqlite_in
     assert updated.created_at == original.created_at
     assert updated.title == "Edited"
     assert updated.description == "Notes"
-    assert [finding.title for finding in await sqlite_instance.get_findings_async()] == ["Edited", "Other"]
+    assert [finding.title for finding in await sqlite_instance.get_findings_async(severity_order=SEVERITY_ORDER)] == [
+        "Edited",
+        "Other",
+    ]
 
 
 async def test_finding_classifications_persist_and_clear_without_losing_evidence(sqlite_instance: SQLiteMemory) -> None:
@@ -272,7 +279,7 @@ async def test_custom_severity_sorts_after_every_preset(sqlite_instance: SQLiteM
                 }
             )
         )
-    assert [finding.title for finding in await sqlite_instance.get_findings_async()] == [
+    assert [finding.title for finding in await sqlite_instance.get_findings_async(severity_order=SEVERITY_ORDER)] == [
         "critical",
         "important",
         "moderate",
@@ -280,6 +287,41 @@ async def test_custom_severity_sorts_after_every_preset(sqlite_instance: SQLiteM
         "informational",
         "other",
     ]
+
+
+async def test_get_findings_sorts_unlisted_severities_after_listed_ones(sqlite_instance: SQLiteMemory) -> None:
+    operation = await sqlite_instance.add_operation_async(Operation(name="Partial order"))
+    stamp = datetime(2026, 10, 9, tzinfo=UTC)
+    for number, severity in enumerate(["low", "critical", "moderate"], start=1):
+        await sqlite_instance.add_finding_async(
+            finding=Finding.model_validate(
+                {
+                    "id": UUID(int=number),
+                    "created_at": stamp,
+                    "operation_id": operation.id,
+                    "title": severity,
+                    "severity": severity,
+                }
+            )
+        )
+    found = await sqlite_instance.get_findings_async(severity_order=["low"])
+    assert [finding.title for finding in found] == ["low", "moderate", "critical"]
+
+
+async def test_get_findings_without_severity_order_sorts_newest_first(sqlite_instance: SQLiteMemory) -> None:
+    operation = await sqlite_instance.add_operation_async(Operation(name="Newest first"))
+    for number, (title, severity) in enumerate([("Old critical", "critical"), ("New low", "low")], start=1):
+        await sqlite_instance.add_finding_async(
+            finding=Finding.model_validate(
+                {
+                    "operation_id": operation.id,
+                    "title": title,
+                    "severity": severity,
+                    "created_at": datetime(2026, 10, number, tzinfo=UTC),
+                }
+            )
+        )
+    assert [finding.title for finding in await sqlite_instance.get_findings_async()] == ["New low", "Old critical"]
 
 
 async def test_finding_mutations_are_scoped_and_delete_only_the_finding(sqlite_instance: SQLiteMemory) -> None:
@@ -430,7 +472,9 @@ async def test_get_findings_by_ids_follows_dashboard_order_and_scope(sqlite_inst
     )
     requested = [saved["Moderate"].id, foreign.id, saved["Low"].id, uuid4(), saved["Newer critical"].id]
     requested += [saved["Older critical"].id, saved["Low"].id]
-    findings = await sqlite_instance.get_findings_by_ids_async(operation_id=operation.id, finding_ids=requested)
+    findings = await sqlite_instance.get_findings_by_ids_async(
+        operation_id=operation.id, finding_ids=requested, severity_order=SEVERITY_ORDER
+    )
     assert [finding.title for finding in findings] == ["Newer critical", "Older critical", "Moderate", "Low"]
 
 
@@ -494,10 +538,9 @@ async def test_finding_severity_counts_group_by_operation(sqlite_instance: SQLit
             finding=Finding(operation_id=operation.id, title="A", severity=severity)
         )
     await sqlite_instance.add_finding_async(finding=Finding(operation_id=other.id, title="B", severity="informational"))
-    assert await sqlite_instance.get_finding_severity_counts_async() == {
-        operation.id: {FindingSeverity.CRITICAL: 2, FindingSeverity.LOW: 1},
-        other.id: {FindingSeverity.INFORMATIONAL: 1},
-    }
+    result = await sqlite_instance.get_finding_severity_counts_async()
+    assert result == {operation.id: {"critical": 2, "low": 1}, other.id: {"informational": 1}}
+    assert all(type(key) is str for counts in result.values() for key in counts)
 
 
 async def test_delete_finding_removes_evidence_without_deleting_source(sqlite_instance: SQLiteMemory) -> None:
