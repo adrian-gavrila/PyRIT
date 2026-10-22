@@ -2019,3 +2019,13 @@ export interface FindingEvidenceListResponse {
   has_more: boolean
   next_offset: number | null
 }
+
+export type FindingExportFormat = 'docx' | 'markdown'
+
+/** Selected findings of one Operation to download as a single document. */
+export interface FindingExportRequest {
+  finding_ids: string[]
+  format: FindingExportFormat
+  /** The dashboard address, including any path prefix, that evidence links open. */
+  dashboard_base_url: string
+}
