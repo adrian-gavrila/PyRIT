@@ -421,6 +421,9 @@ test('exports selected findings as Word and Markdown @seeded', async ({ page, re
     await trigger.click()
     await expect(list.getByRole('checkbox', { checked: true })).toHaveCount(seeds.length)
     await expect(selectAll).toBeChecked()
+    // The sensitive-content warning wraps, and its bar must grow to hold it.
+    const warning = dialog.locator('.fui-MessageBar').filter({ hasText: 'Nothing is redacted automatically.' })
+    expect(await warning.evaluate(element => element.scrollHeight <= element.clientHeight)).toBeTruthy()
   }
   const selectSubset = async (): Promise<void> => {
     await selectAll.click()

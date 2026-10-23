@@ -136,7 +136,7 @@ export default function FindingExportDialog({ operation }: FindingExportDialogPr
     if (load.status === 'loading') return <Spinner label="Loading findings…" />
     if (load.status === 'error') {
       return (
-        <MessageBar intent="error" aria-live="polite"><MessageBarBody>
+        <MessageBar className={styles.messageBar} intent="error" aria-live="polite"><MessageBarBody>
           Could not load findings: {load.error}{' '}
           <Button className={styles.button} onClick={() => {
             setLoad({ status: 'loading' })
@@ -176,11 +176,11 @@ export default function FindingExportDialog({ operation }: FindingExportDialogPr
         <DialogBody>
           <DialogTitle>Export findings</DialogTitle>
           <DialogContent className={styles.content}>
-            <MessageBar intent="warning"><MessageBarBody>
+            <MessageBar className={styles.messageBar} intent="warning"><MessageBarBody>
               Findings, attack objectives and score rationales can contain sensitive content. Nothing is redacted
               automatically.
             </MessageBarBody></MessageBar>
-            {exportError && <MessageBar intent="error" aria-live="polite"><MessageBarBody>
+            {exportError && <MessageBar className={styles.messageBar} intent="error" aria-live="polite"><MessageBarBody>
               Could not export findings: {exportError}
             </MessageBarBody></MessageBar>}
             <Field label="Format">
