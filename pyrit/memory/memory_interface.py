@@ -1046,7 +1046,7 @@ class MemoryInterface(abc.ABC):
         severity_order: Sequence[str] = (),
     ) -> list[Finding]:
         """
-        Read one page of findings, highest severity first, then newest first.
+        Read one page of findings in ``severity_order``, then newest first.
 
         Args:
             operation_id (uuid.UUID | None): The operation whose findings to read. Defaults to None, which reads

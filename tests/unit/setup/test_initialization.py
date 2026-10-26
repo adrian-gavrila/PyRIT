@@ -5,18 +5,31 @@ import logging
 import os
 import pathlib
 import tempfile
+from collections.abc import Iterator
 from unittest import mock
 
 import pytest
+from pydantic import ValidationError
 
 from pyrit.common.apply_defaults import reset_default_values
 from pyrit.common.random_context import get_configured_random_seed
 from pyrit.common.singleton import Singleton
 from pyrit.memory import AzureSQLMemory, CentralMemory, SQLiteMemory
-from pyrit.models import MessagePiece
+from pyrit.models import DEFAULT_FINDING_FIELDS, FindingField, FindingFields, MessagePiece
 from pyrit.registry import InitializerRegistry
-from pyrit.setup import IN_MEMORY, initialize_pyrit_async
+from pyrit.setup import IN_MEMORY, initialization, initialize_pyrit_async
+from pyrit.setup.finding_fields import (
+    get_active_finding_fields,
+    reset_active_finding_fields,
+    set_active_finding_fields,
+)
+from pyrit.setup.initialization import reinitialize_pyrit_async
+from pyrit.setup.initializers import FindingFieldsInitializer
 from pyrit.setup.pyrit_initializer import PyRITInitializer
+
+CUSTOM = FindingFields(
+    severity=FindingField(key="severity", label="Severity", type="choice", options=[("high", "High")])
+)
 
 
 @pytest.mark.parametrize("existing_memory", [False, True])
@@ -440,3 +453,73 @@ class TestInitializePyritSilent:
         await initialize_pyrit_async(memory_db_type=IN_MEMORY, silent=silent, load_defaults=False)
 
         assert CentralMemory.get_memory_instance()._silent is silent
+
+
+class _SetsCustomFields(PyRITInitializer):
+    async def initialize_async(self) -> None:
+        set_active_finding_fields(finding_fields=CUSTOM, source="pass")
+
+
+@pytest.fixture
+def reset_finding_fields() -> Iterator[None]:
+    yield
+    reset_active_finding_fields()
+
+
+@pytest.mark.usefixtures("reset_memory_singletons", "reset_finding_fields")
+async def test_each_setup_pass_resets_finding_fields() -> None:
+    with mock.patch("pyrit.setup.initialization.load_environment_async", new_callable=mock.AsyncMock):
+        await initialize_pyrit_async(memory_db_type=IN_MEMORY, initializers=[_SetsCustomFields()])
+        assert get_active_finding_fields() is CUSTOM
+
+        await initialize_pyrit_async(memory_db_type=IN_MEMORY, initializers=[_SetsCustomFields()])
+        assert get_active_finding_fields() is CUSTOM
+
+        await initialize_pyrit_async(memory_db_type=IN_MEMORY, load_defaults=False)
+        assert get_active_finding_fields() is DEFAULT_FINDING_FIELDS
+
+
+@pytest.mark.usefixtures("reset_finding_fields")
+async def test_reinitialize_resets_finding_fields() -> None:
+    set_active_finding_fields(finding_fields=CUSTOM, source="pass")
+    with (
+        mock.patch.object(CentralMemory, "set_memory_instance"),
+        mock.patch.object(initialization, "_execute_initializers_async", new_callable=mock.AsyncMock),
+    ):
+        await reinitialize_pyrit_async(
+            memory=mock.MagicMock(spec=SQLiteMemory), initializer_factory=list, environment_values={}, seed=None
+        )
+    assert get_active_finding_fields() is DEFAULT_FINDING_FIELDS
+
+
+@pytest.mark.usefixtures("reset_memory_singletons", "reset_finding_fields")
+async def test_second_finding_fields_initializer_stops_setup() -> None:
+    class FirstFindingFields(FindingFieldsInitializer):
+        def get_finding_fields(self) -> FindingFields:
+            return CUSTOM
+
+    class SecondFindingFields(FindingFieldsInitializer):
+        def get_finding_fields(self) -> FindingFields:
+            return CUSTOM
+
+    with mock.patch("pyrit.setup.initialization.load_environment_async", new_callable=mock.AsyncMock):
+        with pytest.raises(
+            ValueError, match="SecondFindingFields cannot set the finding fields: FirstFindingFields already set them"
+        ):
+            await initialize_pyrit_async(
+                memory_db_type=IN_MEMORY, initializers=[FirstFindingFields(), SecondFindingFields()]
+            )
+
+
+@pytest.mark.usefixtures("reset_memory_singletons", "reset_finding_fields")
+async def test_invalid_finding_fields_stop_setup() -> None:
+    class BrokenFindingFields(FindingFieldsInitializer):
+        def get_finding_fields(self) -> FindingFields:
+            return FindingFields(
+                severity=CUSTOM.severity,
+                fields=[FindingField(key="broken", label="Broken", type="choice", options=[])],
+            )
+
+    with mock.patch("pyrit.setup.initialization.load_environment_async", new_callable=mock.AsyncMock):
+        with pytest.raises(ValidationError, match="needs at least one option"):
+            await initialize_pyrit_async(memory_db_type=IN_MEMORY, initializers=[BrokenFindingFields()])
