@@ -15,6 +15,7 @@ import pytest
 from pyrit.common.apply_defaults import get_global_default_values
 from pyrit.common.random_context import configure_random_seed, get_configured_random_seed
 from pyrit.memory import AzureSQLMemory, CentralMemory, SQLiteMemory
+from pyrit.models import DEFAULT_FINDING_FIELDS
 from pyrit.models.catalog import ScenarioSuite
 from pyrit.registry import (
     AttackRegistry,
@@ -26,6 +27,7 @@ from pyrit.registry import (
 )
 from pyrit.setup.configuration_loader import ConfigurationLoader
 from pyrit.setup.environment_loading import resolve_environment_async
+from pyrit.setup.finding_fields import get_active_finding_fields
 from pyrit.setup.initialization import reset_setup_registries, validate_reinitialization_memory
 from pyrit.setup.initializers.targets import TARGET_CONFIGS
 
@@ -111,6 +113,52 @@ async def test_preflight_uses_isolated_registry_without_changing_live_state() ->
     assert prepared.initializer_registry is not live_registry
     assert InitializerRegistry.get_registry_singleton() is live_registry
     assert prepared.script_initializer_types == ()
+
+
+@pytest.mark.usefixtures("reset_finding_fields")
+async def test_preflight_rejects_two_finding_fields_initializers(tmp_path: Path) -> None:
+    script = tmp_path / "two_finding_fields.py"
+    script.write_text(
+        """
+from pyrit.models import FindingField, FindingFields
+from pyrit.setup.initializers import FindingFieldsInitializer
+
+SEVERITY = FindingField(key="severity", label="Severity", type="choice", options=[("sev1", "Sev 1")])
+
+class ContosoFindingFields(FindingFieldsInitializer):
+    def get_finding_fields(self): return FindingFields(severity=SEVERITY)
+
+class ContosoBackupFields(FindingFieldsInitializer):
+    def get_finding_fields(self): return FindingFields(severity=SEVERITY)
+""",
+        encoding="utf-8",
+    )
+    config = ConfigurationLoader(memory_db_type="in_memory", env_files=[], initialization_scripts=[str(script)])
+
+    with pytest.raises(ValueError, match="Use one FindingFieldsInitializer per deployment"):
+        await config.preflight_reinitialization_async(environment_values={})
+    assert get_active_finding_fields() is DEFAULT_FINDING_FIELDS
+
+
+@pytest.mark.usefixtures("reset_finding_fields")
+async def test_preflight_rejects_invalid_finding_fields(tmp_path: Path) -> None:
+    script = tmp_path / "invalid_finding_fields.py"
+    script.write_text(
+        """
+from pyrit.models import FindingField, FindingFields
+from pyrit.setup.initializers import FindingFieldsInitializer
+
+class ContosoFindingFields(FindingFieldsInitializer):
+    def get_finding_fields(self):
+        return FindingFields(severity=FindingField(key="severity", label="Severity", type="choice", options=[]))
+""",
+        encoding="utf-8",
+    )
+    config = ConfigurationLoader(memory_db_type="in_memory", env_files=[], initialization_scripts=[str(script)])
+
+    with pytest.raises(ValueError, match="needs at least one option"):
+        await config.preflight_reinitialization_async(environment_values={})
+    assert get_active_finding_fields() is DEFAULT_FINDING_FIELDS
 
 
 @pytest.mark.usefixtures("patch_central_database")

@@ -91,6 +91,29 @@ class _ConfigurationLayer:
     reset_extensions: bool
 
 
+def _check_finding_fields_initializers(initializers: Sequence["PyRITInitializer"]) -> None:
+    """
+    Check the finding fields the initializers would set, without making them active.
+
+    Args:
+        initializers (Sequence[PyRITInitializer]): The initializers of the replacement setup pass.
+
+    Raises:
+        ValueError: If two or more initializers set the finding fields, or the one that does returns
+            invalid fields.
+    """
+    from pyrit.setup.initializers import FindingFieldsInitializer
+
+    setters = [initializer for initializer in initializers if isinstance(initializer, FindingFieldsInitializer)]
+    if len(setters) > 1:
+        first, second = (type(setter).__name__ for setter in setters[:2])
+        raise ValueError(
+            f"{first} and {second} both set the finding fields. Use one FindingFieldsInitializer per deployment."
+        )
+    if setters:
+        setters[0].get_finding_fields()
+
+
 @dataclass
 class ConfigurationLoader(YamlLoadable):
     """
@@ -706,7 +729,8 @@ class ConfigurationLoader(YamlLoadable):
             PreparedReinitialization: Immutable inputs ready for the mutation phase.
 
         Raises:
-            ValueError: If an initializer is invalid or a required environment value is missing.
+            ValueError: If an initializer is invalid, a required environment value is missing, or the
+                finding fields are invalid or set by more than one initializer.
         """
         from pyrit.registry import InitializerRegistry
         from pyrit.setup.initializers.targets import TargetInitializer
@@ -744,6 +768,7 @@ class ConfigurationLoader(YamlLoadable):
                 raise ValueError(
                     f"Initializer '{type(initializer).__name__}' has missing required environment variables."
                 )
+        _check_finding_fields_initializers(initializers)
 
         return PreparedReinitialization(
             environment_values=dict(environment_values),
