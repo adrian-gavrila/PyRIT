@@ -25,10 +25,10 @@ from pyrit.models import (
     Finding,
     FindingCreate,
     FindingEvidence,
-    FindingSeverity,
     Operation,
     OperationCreate,
 )
+from pyrit.setup.finding_fields import get_active_finding_fields
 
 # Keeps every ID list a batch reads within SQL Server's 2100-parameter limit.
 _EVIDENCE_BATCH_SIZE = 500
@@ -201,7 +201,7 @@ class OperationService:
             limit=limit + 1,
             offset=offset,
             title_query=title_query,
-            severity_order=[severity.value for severity in FindingSeverity],
+            severity_order=get_active_finding_fields().severity_order,
         )
         has_more = len(findings) > limit
         page = findings[:limit]
@@ -277,7 +277,7 @@ class OperationService:
         findings = await memory.get_findings_by_ids_async(
             operation_id=operation_id,
             finding_ids=finding_ids,
-            severity_order=[severity.value for severity in FindingSeverity],
+            severity_order=get_active_finding_fields().severity_order,
         )
         found = {finding.id for finding in findings}
         missing = next((finding_id for finding_id in finding_ids if finding_id not in found), None)

@@ -73,7 +73,7 @@ if TYPE_CHECKING:
     from pyrit.models.conversation_stats import ConversationStats
     from pyrit.models.conversation_summary import ConversationSummary
     from pyrit.models.embeddings import EmbeddingData, EmbeddingResponse, EmbeddingSupport, EmbeddingUsageInformation
-    from pyrit.models.finding import Finding, FindingCreate, FindingEvidence, FindingSeverity
+    from pyrit.models.finding import Finding, FindingCreate, FindingEvidence
     from pyrit.models.finding_fields import (
         DEFAULT_FINDING_FIELDS,
         FindingField,
@@ -449,7 +449,6 @@ _LAZY_EXPORTS: dict[str, str] = {
     "Finding": "pyrit.models.finding",
     "FindingCreate": "pyrit.models.finding",
     "FindingEvidence": "pyrit.models.finding",
-    "FindingSeverity": "pyrit.models.finding",
     "DEFAULT_FINDING_FIELDS": "pyrit.models.finding_fields",
     "FindingField": "pyrit.models.finding_fields",
     "FindingFields": "pyrit.models.finding_fields",

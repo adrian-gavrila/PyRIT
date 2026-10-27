@@ -139,7 +139,7 @@ def test_findings_are_created_and_listed_under_an_operation(compatibility_header
     assert created.status_code == 201
     finding = created.json()
     assert finding["operation_id"] == operation_id
-    assert finding["description"] == ""
+    assert finding["field_values"] == {}
     client.post(f"/api/operations/{other_id}/findings", json={"title": "Elsewhere", "severity": "low"})
     listed = client.get(f"/api/operations/{operation_id}/findings", params={"limit": 1}).json()
     assert listed == {"items": [{**finding, "evidence_count": 0}], "has_more": False, "next_offset": None}
@@ -165,39 +165,34 @@ def test_finding_options_exposes_canonical_harm_types(compatibility_headers: dic
     assert TestClient(app).get("/api/operations/finding-options").status_code != 200
 
 
-def test_finding_api_round_trips_optional_and_custom_classifications(compatibility_headers: dict[str, str]) -> None:
+def test_finding_api_round_trips_field_values_and_drops_blanks(compatibility_headers: dict[str, str]) -> None:
     client = TestClient(app, headers=compatibility_headers)
-    operation_id = client.post("/api/operations", json={"name": "Classifications"}).json()["id"]
+    operation_id = client.post("/api/operations", json={"name": "Field values"}).json()["id"]
     path = f"/api/operations/{operation_id}/findings"
     body = {
         "title": "Custom",
-        "severity": "other",
-        "severity_other": "  Team severity  ",
-        "harm_type": "Other",
-        "harm_type_other": "  Team harm  ",
+        "severity": "  Team severity  ",
+        "field_values": {"harm_type": "Malware", "description": " "},
     }
     response = client.post(path, json=body)
     assert response.status_code == 201
     finding = response.json()
-    assert {key: finding[key] for key in body} == body
+    assert finding["severity"] == "  Team severity  "
+    assert finding["field_values"] == {"harm_type": "Malware"}
     assert client.get(path).json()["items"] == [{**finding, "evidence_count": 0}]
-    updated = client.put(f"{path}/{finding['id']}", json={"title": "Edited", "severity": "low", "harm_type": "Malware"})
+    updated = client.put(f"{path}/{finding['id']}", json={"title": "Edited", "severity": "low"})
     assert updated.status_code == 200
-    assert updated.json()["harm_type"] == "Malware"
-    assert updated.json()["severity_other"] is None
-    assert updated.json()["harm_type_other"] is None
+    assert updated.json()["field_values"] == {}
     assert updated.json()["id"] == finding["id"]
     assert updated.json()["created_at"] == finding["created_at"]
     for invalid in [
-        {"severity": "other"},
-        {"severity": "low", "severity_other": "Stray"},
-        {"severity": "low", "harm_type": "Other"},
-        {"severity": "low", "harm_type": "Unknown"},
+        {"severity": " "},
+        {"severity": "low", "harm_type": "Malware"},
+        {"severity": "low", "field_values": {"harm_type": 3}},
     ]:
         assert client.post(path, json={"title": "Invalid", **invalid}).status_code == 422
         assert client.put(f"{path}/{finding['id']}", json={"title": "Invalid", **invalid}).status_code == 422
-    cleared = client.put(f"{path}/{finding['id']}", json={"title": "No harm type", "severity": "moderate"})
-    assert cleared.json()["harm_type"] is None
+    assert client.get(path).json()["items"] == [{**updated.json(), "evidence_count": 0}]
 
 
 def test_findings_require_an_existing_operation(compatibility_headers: dict[str, str]) -> None:
@@ -274,7 +269,8 @@ def test_finding_create_saves_nothing_when_its_evidence_cannot_be_linked(
         ("/api/operations", {"name": " "}),
         ("/api/operations", {"name": "😀" * 65}),
         ("findings", {"title": "", "severity": "low"}),
-        ("findings", {"title": "Assessment", "severity": "urgent"}),
+        ("findings", {"title": "Assessment", "severity": " "}),
+        ("findings", {"title": "Assessment", "severity": "low", "description": "x"}),
         ("findings", {"title": "Assessment", "severity": "low", "operation": "Case"}),
     ],
 )
@@ -306,9 +302,16 @@ def test_finding_update_and_delete_preserve_identity_and_operation(
     path = f"/api/operations/{operation['id']}/findings"
     original = client.post(path, json={"title": "Original", "severity": "low"}).json()
     finding_path = f"{path}/{original['id']}"
-    edited = client.put(finding_path, json={"title": "Edited", "severity": "critical", "description": "Notes"})
+    edited = client.put(
+        finding_path, json={"title": "Edited", "severity": "critical", "field_values": {"description": "Notes"}}
+    )
     assert edited.status_code == 200
-    assert edited.json() == {**original, "title": "Edited", "severity": "critical", "description": "Notes"}
+    assert edited.json() == {
+        **original,
+        "title": "Edited",
+        "severity": "critical",
+        "field_values": {"description": "Notes"},
+    }
     assert client.get(path).json()["items"] == [{**edited.json(), "evidence_count": 0}]
     deleted = client.delete(finding_path)
     assert deleted.status_code == 204
@@ -335,7 +338,8 @@ def test_finding_mutations_reject_wrong_operations_and_invalid_fields(
     finding_path = f"{path}/{original['id']}"
     for invalid in [
         {**body, "title": " "},
-        {**body, "severity": "urgent"},
+        {"title": "Assessment", "severity": " "},
+        {"title": "Assessment", "severity": "low", "description": "x"},
         {**body, "operation_id": other_id},
         {**body, "created_at": original["created_at"]},
     ]:
