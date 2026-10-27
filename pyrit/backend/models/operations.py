@@ -15,14 +15,7 @@ from pyrit.models import (
     Operation,
     OperationUsage,
 )
-from pyrit.models.harm_category import HarmCategory
 from pyrit.models.operation import OperationName
-
-
-class FindingOptionsResponse(BaseModel):
-    """Harm categories a finding can use."""
-
-    harm_types: list[HarmCategory]
 
 
 class OperationListItem(Operation):

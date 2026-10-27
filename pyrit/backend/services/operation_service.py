@@ -163,8 +163,10 @@ class OperationService:
 
         Raises:
             FindingConflictError: If the ID already belongs to a different finding.
+            FindingValuesError: If the values do not fit the active finding fields.
         """
         await self.get_async(operation_id)
+        get_active_finding_fields().check_values(severity=request.severity, field_values=request.field_values)
         finding = Finding(
             operation_id=operation_id,
             id=request.id or uuid4(),
@@ -435,13 +437,23 @@ class OperationService:
         """
         Replace a finding's editable fields within an existing operation.
 
+        Values that have not changed since the last save may use fields or options that no longer exist.
+
         Returns:
             Finding: The updated finding.
 
         Raises:
             FindingNotFoundError: If the finding is missing or belongs to another operation.
+            FindingValuesError: If the values do not fit the active finding fields.
         """
         await self.get_async(operation_id)
+        stored = await self._require_finding_async(operation_id=operation_id, finding_id=finding_id)
+        get_active_finding_fields().check_values(
+            severity=request.severity,
+            field_values=request.field_values,
+            previous_severity=stored.severity,
+            previous_values=stored.field_values,
+        )
         try:
             return await CentralMemory.get_memory_instance().update_finding_async(
                 operation_id=operation_id, finding_id=finding_id, request=request

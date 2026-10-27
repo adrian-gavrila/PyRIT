@@ -14,7 +14,6 @@ from pyrit.backend.models.operations import (
     FindingEvidenceListResponse,
     FindingExportRequest,
     FindingListResponse,
-    FindingOptionsResponse,
     OperationDetail,
     OperationListResponse,
     OperationUpdateRequest,
@@ -29,8 +28,8 @@ from pyrit.backend.services.operation_service import (
     OperationService,
 )
 from pyrit.memory.memory_interface import OperationInUseError
-from pyrit.models import Finding, FindingCreate, Operation, OperationCreate
-from pyrit.models.harm_category import HarmCategory
+from pyrit.models import Finding, FindingCreate, FindingFields, FindingValuesError, Operation, OperationCreate
+from pyrit.setup.finding_fields import get_active_finding_fields
 
 T = TypeVar("T")
 
@@ -65,15 +64,15 @@ async def list_operations_async() -> OperationListResponse:
     return OperationListResponse(items=await OperationService().list_async())
 
 
-@router.get("/finding-options", response_model=FindingOptionsResponse)
-async def get_finding_options_async() -> FindingOptionsResponse:
+@router.get("/finding-fields", response_model=FindingFields)
+async def get_finding_fields_async() -> FindingFields:
     """
-    List the harm categories a finding can use.
+    Read the finding fields that this deployment's setup configured.
 
     Returns:
-        FindingOptionsResponse: Selectable categories, including Other.
+        FindingFields: The severity slot and the fields shown after it.
     """
-    return FindingOptionsResponse(harm_types=list(HarmCategory))
+    return get_active_finding_fields()
 
 
 @router.get("/{operation_id}", response_model=OperationDetail)
@@ -137,7 +136,8 @@ async def create_operation_finding_async(*, operation_id: UUID, request: Finding
         Finding: The saved finding.
 
     Raises:
-        HTTPException: 409 when the ID already belongs to a different finding.
+        HTTPException: 409 when the ID already belongs to a different finding, and 422 when the values
+            do not fit the active finding fields.
     """
     try:
         return await _require_operation_async(
@@ -145,6 +145,8 @@ async def create_operation_finding_async(*, operation_id: UUID, request: Finding
         )
     except FindingConflictError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except FindingValuesError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
 
 
 @router.get("/{operation_id}/findings", response_model=FindingListResponse)
@@ -191,10 +193,16 @@ async def update_operation_finding_async(*, operation_id: UUID, finding_id: UUID
 
     Returns:
         Finding: The updated finding.
+
+    Raises:
+        HTTPException: 422 when the values do not fit the active finding fields.
     """
-    return await _require_operation_async(
-        OperationService().update_finding_async(operation_id=operation_id, finding_id=finding_id, request=request)
-    )
+    try:
+        return await _require_operation_async(
+            OperationService().update_finding_async(operation_id=operation_id, finding_id=finding_id, request=request)
+        )
+    except FindingValuesError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
 
 
 @router.delete("/{operation_id}/findings/{finding_id}", status_code=status.HTTP_204_NO_CONTENT)

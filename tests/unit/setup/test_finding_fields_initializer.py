@@ -2,7 +2,6 @@
 # Licensed under the MIT license.
 
 import importlib.util
-from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -11,9 +10,11 @@ import pyrit.setup.initializers
 from pyrit.models import DEFAULT_FINDING_FIELDS, FindingField, FindingFields
 from pyrit.registry import InitializerRegistry
 from pyrit.registry.discovery import discover_in_directory
-from pyrit.setup.finding_fields import get_active_finding_fields, reset_active_finding_fields
+from pyrit.setup.finding_fields import get_active_finding_fields
 from pyrit.setup.initializers import FindingFieldsInitializer
 from pyrit.setup.pyrit_initializer import PyRITInitializer
+
+pytestmark = pytest.mark.usefixtures("reset_finding_fields")
 
 EXAMPLE = FindingFields(
     severity=FindingField(key="severity", label="Severity", type="choice", options=[("high", "High")])
@@ -39,12 +40,6 @@ class ExampleFindingFields(FindingFieldsInitializer):
 
     def get_finding_fields(self) -> FindingFields:
         return EXAMPLE
-
-
-@pytest.fixture(autouse=True)
-def reset_finding_fields() -> Iterator[None]:
-    yield
-    reset_active_finding_fields()
 
 
 async def test_finding_fields_initializer_sets_the_active_fields() -> None:

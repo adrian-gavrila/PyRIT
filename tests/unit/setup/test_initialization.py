@@ -5,7 +5,6 @@ import logging
 import os
 import pathlib
 import tempfile
-from collections.abc import Iterator
 from unittest import mock
 
 import pytest
@@ -18,11 +17,7 @@ from pyrit.memory import AzureSQLMemory, CentralMemory, SQLiteMemory
 from pyrit.models import DEFAULT_FINDING_FIELDS, FindingField, FindingFields, MessagePiece
 from pyrit.registry import InitializerRegistry
 from pyrit.setup import IN_MEMORY, initialization, initialize_pyrit_async
-from pyrit.setup.finding_fields import (
-    get_active_finding_fields,
-    reset_active_finding_fields,
-    set_active_finding_fields,
-)
+from pyrit.setup.finding_fields import get_active_finding_fields, set_active_finding_fields
 from pyrit.setup.initialization import reinitialize_pyrit_async
 from pyrit.setup.initializers import FindingFieldsInitializer
 from pyrit.setup.pyrit_initializer import PyRITInitializer
@@ -458,12 +453,6 @@ class TestInitializePyritSilent:
 class _SetsCustomFields(PyRITInitializer):
     async def initialize_async(self) -> None:
         set_active_finding_fields(finding_fields=CUSTOM, source="pass")
-
-
-@pytest.fixture
-def reset_finding_fields() -> Iterator[None]:
-    yield
-    reset_active_finding_fields()
 
 
 @pytest.mark.usefixtures("reset_memory_singletons", "reset_finding_fields")

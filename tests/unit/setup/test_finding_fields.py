@@ -1,8 +1,6 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-from collections.abc import Iterator
-
 import pytest
 
 from pyrit.models import DEFAULT_FINDING_FIELDS, FindingField, FindingFields
@@ -12,15 +10,11 @@ from pyrit.setup.finding_fields import (
     set_active_finding_fields,
 )
 
+pytestmark = pytest.mark.usefixtures("reset_finding_fields")
+
 CUSTOM = FindingFields(
     severity=FindingField(key="severity", label="Severity", type="choice", options=[("high", "High")])
 )
-
-
-@pytest.fixture(autouse=True)
-def reset_finding_fields() -> Iterator[None]:
-    yield
-    reset_active_finding_fields()
 
 
 def test_active_finding_fields_default_to_3066() -> None:
