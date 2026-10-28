@@ -27,9 +27,12 @@ def set_active_finding_fields(*, finding_fields: FindingFields, source: str) -> 
         source (str): The setter's name, which the error names when two setters run in one pass.
 
     Raises:
+        TypeError: If ``finding_fields`` is not a ``FindingFields``.
         ValueError: If finding fields were already set in this setup pass.
     """
     global _active
+    if not isinstance(finding_fields, FindingFields):
+        raise TypeError(f"{source} must set FindingFields, not {type(finding_fields).__name__}.")
     if _active is not None:
         raise ValueError(
             f"{source} cannot set the finding fields: {_active[1]} already set them in this setup pass. "

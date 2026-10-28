@@ -215,6 +215,11 @@ class FindingFields(BaseModel):
         """The top-level option keys of the severity slot, from highest to lowest severity."""
         return [option.key for option in self.severity.options]
 
+    @property
+    def field_keys(self) -> frozenset[str]:
+        """The key of every field and level, except ``severity``."""
+        return frozenset(key for field in [self.severity, *self.fields] for key in _keys_of(field)) - {"severity"}
+
     @field_validator("severity")
     @classmethod
     def _validate_severity_slot(cls, value: FindingField) -> FindingField:
@@ -281,8 +286,9 @@ class FindingFields(BaseModel):
                 new finding.
 
         Raises:
-            FindingValuesError: For the first unknown key, missing required value, or value that is
-                not an option.
+            FindingValuesError: For the first unknown key, changed value of a field that is no longer
+                configured, missing required value, value that is not an option, or Other text that
+                matches an option.
         """
         previous_values = previous_values or {}
         self._check_known_keys(field_values=field_values, previous_values=previous_values)
@@ -302,10 +308,15 @@ class FindingFields(BaseModel):
         Raises:
             FindingValuesError: If a key is unknown and its value differs from the stored one.
         """
-        known = {key for field in [self.severity, *self.fields] for key in _keys_of(field)} - {"severity"}
+        known = self.field_keys
         for key, value in field_values.items():
-            if key not in known and previous_values.get(key) != value:
-                raise FindingValuesError(f"Unknown finding field {key!r}.")
+            if key in known or previous_values.get(key) == value:
+                continue
+            if key in previous_values:
+                raise FindingValuesError(
+                    f"Finding field {key!r} is no longer configured, so its saved value can't change."
+                )
+            raise FindingValuesError(f"Unknown finding field {key!r}.")
 
 
 def _parse_options(value: Any) -> Any:
@@ -451,8 +462,8 @@ def _check_choice_values(*, field: FindingField, values: dict[str, str], previou
         previous_values (dict[str, str]): Every value of the stored finding, by key.
 
     Raises:
-        FindingValuesError: If a required dropdown with options has no value, or a value is not an
-            option and is neither unchanged nor allowed as Other text.
+        FindingValuesError: If a required dropdown with options has no value, or a changed value is
+            not an option and is not allowed as Other text.
     """
     options = field.options
     path_unchanged = True
@@ -464,12 +475,19 @@ def _check_choice_values(*, field: FindingField, values: dict[str, str], previou
             value=value,
             options=options,
             required=field.required,
-            accepts_unmatched=path_unchanged or field.allow_other,
+            unchanged=path_unchanged,
+            allow_other=field.allow_other,
         )
 
 
 def _check_level(
-    *, label: str, value: str | None, options: list[FindingFieldOption], required: bool, accepts_unmatched: bool
+    *,
+    label: str,
+    value: str | None,
+    options: list[FindingFieldOption],
+    required: bool,
+    unchanged: bool,
+    allow_other: bool,
 ) -> list[FindingFieldOption]:
     """
     Check one dropdown's value and find the options of the next dropdown.
@@ -479,24 +497,52 @@ def _check_level(
         value (str | None): The dropdown's value, or None if it is missing.
         options (list[FindingFieldOption]): The options the dropdown offers.
         required (bool): Whether the field is required.
-        accepts_unmatched (bool): Whether a value that is not an option passes.
+        unchanged (bool): Whether this value and every value above it are unchanged, so a value
+            that is not an option passes.
+        allow_other (bool): Whether the field accepts Other text.
 
     Returns:
         list[FindingFieldOption]: The children of the chosen option, or an empty list if there is
             no matching option.
 
     Raises:
-        FindingValuesError: If a required dropdown with options has no value, or the value is not
-            an option and ``accepts_unmatched`` is False.
+        FindingValuesError: If a required dropdown with options has no value, or a changed value is
+            not an option and is not allowed as Other text.
     """
     if value is None:
         if required and options:
             raise FindingValuesError(f"{label} is required.")
         return []
     match = next((option for option in options if option.key == value), None)
-    if match is None and not accepts_unmatched:
+    if match is not None:
+        return match.children
+    if not unchanged:
+        _check_other_text(label=label, value=value, options=options, allow_other=allow_other)
+    return []
+
+
+def _check_other_text(*, label: str, value: str, options: list[FindingFieldOption], allow_other: bool) -> None:
+    """
+    Accept a value that is not an option only as Other text that names no option.
+
+    Args:
+        label (str): The dropdown's label.
+        value (str): The dropdown's value.
+        options (list[FindingFieldOption]): The options the dropdown offers.
+        allow_other (bool): Whether the field accepts Other text.
+
+    Raises:
+        FindingValuesError: If the field takes no Other text, or the text matches an option's key or
+            label apart from case and surrounding spaces.
+    """
+    if not allow_other:
         raise FindingValuesError(f"{label} has no option {value!r}.")
-    return [] if match is None else match.children
+    folded = value.strip().casefold()
+    for option in options:
+        if folded in (option.key.strip().casefold(), option.label.strip().casefold()):
+            raise FindingValuesError(
+                f"{label} {value!r} matches the option {option.key!r}. Send {option.key!r} instead."
+            )
 
 
 def _non_blank(value: str | None) -> str | None:

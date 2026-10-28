@@ -33,7 +33,7 @@ def test_finding_drops_blank_field_values_and_keeps_other_text_exactly() -> None
     [
         {"title": " ", "severity": "low"},
         {"title": "Leak", "severity": " "},
-        {"title": "Leak", "severity": "low", "description": "a #3066 field"},
+        {"title": "Leak", "severity": "low", "description": "x"},
         {"title": "Leak", "severity": "low", "field_values": {"steps": 3}},
     ],
 )

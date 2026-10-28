@@ -1056,7 +1056,7 @@ class MemoryInterface(abc.ABC):
             title_query (str | None): Case-insensitive text the title must contain. Wildcard characters match
                 literally. Defaults to None.
             severity_order (Sequence[str]): Severity keys from highest to lowest. Stored values that aren't listed
-                sort after them. Empty orders newest first.
+                sort after them. Defaults to an empty order, which sorts newest first.
 
         Returns:
             list[Finding]: The findings on the page.

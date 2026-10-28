@@ -300,7 +300,7 @@ class FindingEntry(Base):
         CustomUUID, ForeignKey(f"{OperationEntry.__tablename__}.id"), nullable=False
     )
     title: Mapped[str] = mapped_column(Unicode, nullable=False)
-    # Binary collation makes SQL Server sort and count severities exactly, as SQLite does.
+    # Binary collation keeps SQL Server from merging severities that differ only in case or accents, as SQLite does.
     severity: Mapped[str] = mapped_column(
         Unicode().with_variant(Unicode(collation="Latin1_General_100_BIN2"), "mssql"), nullable=False
     )

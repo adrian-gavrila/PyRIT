@@ -104,6 +104,13 @@ def test_upgrade_moves_existing_findings_into_field_values() -> None:
                 C: ("low", {"harm_type": "Jailbreak"}),
                 D: ("critical", {"description": 'Quote " and \\ backslash'}),
             }
+            kept = {
+                finding_id: (operation_id, created_at)
+                for finding_id, operation_id, created_at in connection.execute(
+                    sa.text("SELECT id, operation_id, created_at FROM FindingEntries")
+                )
+            }
+            assert kept == dict.fromkeys((A, B, C, D), (OPERATION_ID, STAMP))
             evidence_rows = [
                 tuple(row)
                 for row in connection.execute(

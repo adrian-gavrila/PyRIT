@@ -29,7 +29,7 @@ PREVIOUS_REVISION = "3f6a9d2c8b1e"
 REVISION = "c8d3e5f7a901"
 TABLES = {"OperationEntries", "FindingEntries", "FindingEvidenceEntries"}
 ACTIVITY_TABLES = ("AttackResultEntries", "ScenarioResultEntries")
-# FindingEntry models the head revision, which no longer has the #3066 finding columns.
+# FindingEntry models the head revision, which no longer has this revision's finding columns.
 FINDINGS = sa.table(
     "FindingEntries",
     *(
@@ -82,6 +82,7 @@ def test_migration_adds_tables_without_changing_existing_ones() -> None:
             assert {name: columns for name, columns in after.items() if name not in ACTIVITY_TABLES} == {
                 name: columns for name, columns in existing.items() if name not in ACTIVITY_TABLES
             }
+            # check_schema_migrations compares the database with the head models.
             command.upgrade(config, "head")
         check_schema_migrations(engine=engine)
     finally:

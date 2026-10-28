@@ -1,6 +1,8 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
+import re
+
 import pytest
 
 from pyrit.models import DEFAULT_FINDING_FIELDS, FindingField, FindingFields
@@ -31,6 +33,12 @@ def test_set_active_finding_fields_twice_names_both_sources() -> None:
     with pytest.raises(ValueError, match="Second cannot set the finding fields: First already set them"):
         set_active_finding_fields(finding_fields=DEFAULT_FINDING_FIELDS, source="Second")
     assert get_active_finding_fields() is CUSTOM
+
+
+def test_set_active_finding_fields_rejects_a_value_that_is_not_finding_fields() -> None:
+    with pytest.raises(TypeError, match=re.escape("Contoso must set FindingFields, not dict.")):
+        set_active_finding_fields(finding_fields={}, source="Contoso")
+    assert get_active_finding_fields() is DEFAULT_FINDING_FIELDS
 
 
 def test_reset_restores_the_default() -> None:

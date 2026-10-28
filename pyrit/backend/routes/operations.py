@@ -14,6 +14,7 @@ from pyrit.backend.models.operations import (
     FindingEvidenceListResponse,
     FindingExportRequest,
     FindingListResponse,
+    FindingUpdateRequest,
     OperationDetail,
     OperationListResponse,
     OperationUpdateRequest,
@@ -28,7 +29,7 @@ from pyrit.backend.services.operation_service import (
     OperationService,
 )
 from pyrit.memory.memory_interface import OperationInUseError
-from pyrit.models import Finding, FindingCreate, FindingFields, FindingValuesError, Operation, OperationCreate
+from pyrit.models import Finding, FindingFields, FindingValuesError, Operation, OperationCreate
 from pyrit.setup.finding_fields import get_active_finding_fields
 
 T = TypeVar("T")
@@ -67,7 +68,7 @@ async def list_operations_async() -> OperationListResponse:
 @router.get("/finding-fields", response_model=FindingFields)
 async def get_finding_fields_async() -> FindingFields:
     """
-    Read the finding fields that this deployment's setup configured.
+    Read the finding fields this deployment uses.
 
     Returns:
         FindingFields: The severity slot and the fields shown after it.
@@ -130,7 +131,7 @@ async def create_operation_finding_async(*, operation_id: UUID, request: Finding
     """
     Record a finding within an operation, optionally with one saved attack result as evidence.
 
-    Retrying with the same ID and content returns the saved finding.
+    Retrying with the same ID and content returns the saved finding, as long as it still fits the active finding fields.
 
     Returns:
         Finding: The saved finding.
@@ -187,9 +188,15 @@ async def export_operation_findings_async(*, operation_id: UUID, request: Findin
 
 
 @router.put("/{operation_id}/findings/{finding_id}", response_model=Finding)
-async def update_operation_finding_async(*, operation_id: UUID, finding_id: UUID, request: FindingCreate) -> Finding:
+async def update_operation_finding_async(
+    *, operation_id: UUID, finding_id: UUID, request: FindingUpdateRequest
+) -> Finding:
     """
-    Replace the editable fields of a finding in its operation.
+    Replace a finding's current field values in its operation.
+
+    A current field left out is cleared. Values of fields that are no longer configured are kept and can't
+    change; list them in ``remove_retired_keys`` to delete them. Values that haven't changed may use options
+    that no longer exist.
 
     Returns:
         Finding: The updated finding.

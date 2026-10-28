@@ -86,6 +86,12 @@ def test_severity_slot_is_required_and_ordered() -> None:
     assert CONTOSO.severity_order == ["sev1", "sev2", "sev3"]
 
 
+def test_field_keys_lists_every_field_and_level_key_except_severity() -> None:
+    assert CONTOSO.field_keys == frozenset(
+        {"severity_rationale", "category", "subcategory", "technique", "steps", "owner"}
+    )
+
+
 def test_default_finding_fields_match_3066() -> None:
     severity, (harm, description) = DEFAULT_FINDING_FIELDS.severity, DEFAULT_FINDING_FIELDS.fields
     assert DEFAULT_FINDING_FIELDS.severity_order == ["critical", "important", "moderate", "low", "informational"]
@@ -268,6 +274,14 @@ def test_check_values_accepts(
         ),
         pytest.param(
             "sev1",
+            {**VALID, "reviewer": "kim"},
+            "sev1",
+            VALID,
+            "Unknown finding field 'reviewer'.",
+            id="unknown key the stored finding never had",
+        ),
+        pytest.param(
+            "sev1",
             {**VALID, "severity": "sev1"},
             None,
             None,
@@ -279,7 +293,7 @@ def test_check_values_accepts(
             {**VALID, "repro": "new"},
             "sev1",
             {**VALID, "repro": "old"},
-            "Unknown finding field 'repro'.",
+            "Finding field 'repro' is no longer configured, so its saved value can't change.",
             id="changed retired field",
         ),
     ],
@@ -292,6 +306,49 @@ def test_check_values_rejects(
             severity=severity, field_values=values, previous_severity=previous_severity, previous_values=previous_values
         )
     assert str(error.value) == message
+
+
+@pytest.mark.parametrize(
+    ("severity", "values", "message"),
+    [
+        pytest.param(
+            "Critical",
+            {},
+            "Severity 'Critical' matches the option 'critical'. Send 'critical' instead.",
+            id="severity label",
+        ),
+        pytest.param(
+            "CRITICAL",
+            {},
+            "Severity 'CRITICAL' matches the option 'critical'. Send 'critical' instead.",
+            id="severity key in capitals",
+        ),
+        pytest.param(
+            "low ", {}, "Severity 'low ' matches the option 'low'. Send 'low' instead.", id="severity key with a space"
+        ),
+        pytest.param(
+            "low",
+            {"harm_type": "malware"},
+            "Harm-type 'malware' matches the option 'Malware'. Send 'Malware' instead.",
+            id="harm type key in lowercase",
+        ),
+    ],
+)
+def test_check_values_rejects_other_text_that_matches_an_option(
+    severity: str, values: dict[str, str], message: str
+) -> None:
+    with pytest.raises(FindingValuesError) as error:
+        DEFAULT_FINDING_FIELDS.check_values(severity=severity, field_values=values)
+    assert str(error.value) == message
+
+
+@pytest.mark.parametrize("severity", ["Sev 2.5", "critcal"])
+def test_check_values_accepts_other_text_that_matches_no_option(severity: str) -> None:
+    DEFAULT_FINDING_FIELDS.check_values(severity=severity, field_values={})
+
+
+def test_check_values_accepts_unchanged_other_text_that_matches_an_option() -> None:
+    DEFAULT_FINDING_FIELDS.check_values(severity="Critical", field_values={}, previous_severity="Critical")
 
 
 AREA = _choice(

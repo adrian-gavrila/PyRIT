@@ -217,6 +217,16 @@ def test_finding_create_is_checked_against_the_active_fields(
     assert created.status_code == 201
 
 
+def test_finding_create_rejects_other_text_that_matches_an_option(compatibility_headers: dict[str, str]) -> None:
+    client = TestClient(app, headers=compatibility_headers)
+    operation_id = client.post("/api/operations", json={"name": "Case"}).json()["id"]
+    path = f"/api/operations/{operation_id}/findings"
+    rejected = client.post(path, json={"title": "Leak", "severity": "Critical"})
+    assert rejected.status_code == 422
+    assert rejected.json()["detail"] == "Severity 'Critical' matches the option 'critical'. Send 'critical' instead."
+    assert client.get(path).json()["items"] == []
+
+
 def test_finding_api_round_trips_field_values_and_drops_blanks(compatibility_headers: dict[str, str]) -> None:
     client = TestClient(app, headers=compatibility_headers)
     operation_id = client.post("/api/operations", json={"name": "Field values"}).json()["id"]
@@ -440,20 +450,42 @@ async def test_update_rejects_a_changed_retired_value_async(
     body = {"title": "Leak", "severity": "sev1", "field_values": {"steps": "1. Open", "description": "New text"}}
     response = client.put(f"{path}/{finding.id}", json=body)
     assert response.status_code == 422
-    assert response.json()["detail"] == "Unknown finding field 'description'."
+    assert (
+        response.json()["detail"]
+        == "Finding field 'description' is no longer configured, so its saved value can't change."
+    )
     stored = await sqlite_instance.get_finding_async(operation_id=finding.operation_id, finding_id=finding.id)
     assert stored is not None
     assert stored.field_values == {"steps": "1. Open", "description": "Old text"}
     assert client.put(f"{path}/{MISSING_ID}", json=body).status_code == 404
 
 
-async def test_update_removes_an_omitted_retired_value_async(
+async def test_update_keeps_an_omitted_retired_value_async(
     sqlite_instance: SQLiteMemory, retired_value_finding_async: Finding, compatibility_headers: dict[str, str]
 ) -> None:
     finding = retired_value_finding_async
     response = TestClient(app, headers=compatibility_headers).put(
         f"/api/operations/{finding.operation_id}/findings/{finding.id}",
         json={"title": "Leak", "severity": "sev1", "field_values": {"steps": "1. Open"}},
+    )
+    assert response.status_code == 200
+    stored = await sqlite_instance.get_finding_async(operation_id=finding.operation_id, finding_id=finding.id)
+    assert stored is not None
+    assert stored.field_values == {"steps": "1. Open", "description": "Old text"}
+
+
+async def test_update_removes_a_listed_retired_value_async(
+    sqlite_instance: SQLiteMemory, retired_value_finding_async: Finding, compatibility_headers: dict[str, str]
+) -> None:
+    finding = retired_value_finding_async
+    response = TestClient(app, headers=compatibility_headers).put(
+        f"/api/operations/{finding.operation_id}/findings/{finding.id}",
+        json={
+            "title": "Leak",
+            "severity": "sev1",
+            "field_values": {"steps": "1. Open"},
+            "remove_retired_keys": ["description"],
+        },
     )
     assert response.status_code == 200
     stored = await sqlite_instance.get_finding_async(operation_id=finding.operation_id, finding_id=finding.id)
