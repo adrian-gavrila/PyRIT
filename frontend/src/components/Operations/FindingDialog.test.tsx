@@ -199,7 +199,7 @@ describe('FindingDialog', () => {
     }, ATTEMPT))
   })
 
-  it('edits don\'t resend retired values', async () => {
+  it('edits resend kept retired values unchanged', async () => {
     const user = userEvent.setup()
     const onSave = jest.fn().mockResolvedValue(undefined)
     renderDialog({ fields: CONTOSO_FINDING_FIELDS, editing: true, initialValues: CONTOSO_EDIT, onSave })
@@ -213,7 +213,29 @@ describe('FindingDialog', () => {
 
     await user.click(saveButton())
     await waitFor(() => expect(onSave).toHaveBeenCalledWith({
-      title: CONTOSO_EDIT.title, severity: 'sev1', field_values: CONTOSO_CURRENT_VALUES, removeRetiredKeys: [],
+      title: CONTOSO_EDIT.title, severity: 'sev1', field_values: CONTOSO_EDIT.field_values, removeRetiredKeys: [],
+    }, ATTEMPT))
+  })
+
+  it('keeps the fields it opened with when the page reloads them, and resends a returned value unchanged', async () => {
+    const user = userEvent.setup()
+    const onSave = jest.fn().mockResolvedValue(undefined)
+    const props = { editing: true, initialValues: CONTOSO_EDIT, onSave, onClose: jest.fn() }
+    // A live apply brought `description` back after the dialog opened, and the page reloaded its fields.
+    const reloaded: FindingFields = {
+      ...CONTOSO_FINDING_FIELDS, fields: [...CONTOSO_FINDING_FIELDS.fields, DEFAULT_FINDING_FIELDS_FIXTURE.fields[1]],
+    }
+    const { rerender } = render(<TestWrapper><FindingDialog fields={CONTOSO_FINDING_FIELDS} {...props} /></TestWrapper>)
+    rerender(<TestWrapper><FindingDialog fields={reloaded} {...props} /></TestWrapper>)
+
+    const retired = screen.getByRole('group', { name: 'Retired fields · read-only' })
+    expect(within(retired).getByText('description')).toBeInTheDocument()
+    expect(within(retired).getByText('Recorded before Contoso configured its own fields.')).toBeInTheDocument()
+    expect(screen.queryByRole('textbox', { name: 'Description' })).not.toBeInTheDocument()
+
+    await user.click(saveButton())
+    await waitFor(() => expect(onSave).toHaveBeenCalledWith({
+      title: CONTOSO_EDIT.title, severity: 'sev1', field_values: CONTOSO_EDIT.field_values, removeRetiredKeys: [],
     }, ATTEMPT))
   })
 
@@ -241,6 +263,8 @@ describe('FindingDialog', () => {
       title: CONTOSO_EDIT.title, severity: 'sev1', field_values: CONTOSO_CURRENT_VALUES,
       removeRetiredKeys: ['description'],
     }, ATTEMPT))
+    // The backend rejects a key that is both sent and listed for removal.
+    expect((onSave.mock.calls[0] as [FindingDraft])[0].field_values).not.toHaveProperty('description')
   })
 
   it('moves focus to Undo after a removal, and Escape closes only the confirmation', async () => {

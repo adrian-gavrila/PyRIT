@@ -78,6 +78,8 @@ if TYPE_CHECKING:
         DEFAULT_FINDING_FIELDS,
         FindingField,
         FindingFields,
+        FindingFieldType,
+        FindingSeverityColor,
         FindingValuesError,
     )
     from pyrit.models.harm_definition import HarmDefinition, ScaleDescription, get_all_harm_definitions
@@ -452,6 +454,8 @@ _LAZY_EXPORTS: dict[str, str] = {
     "DEFAULT_FINDING_FIELDS": "pyrit.models.finding_fields",
     "FindingField": "pyrit.models.finding_fields",
     "FindingFields": "pyrit.models.finding_fields",
+    "FindingFieldType": "pyrit.models.finding_fields",
+    "FindingSeverityColor": "pyrit.models.finding_fields",
     "FindingValuesError": "pyrit.models.finding_fields",
     "ConversationType": "pyrit.models.messages.conversation_reference",
     "ContentEntryScorable": "pyrit.models.score",

@@ -1081,7 +1081,7 @@ class MemoryInterface(abc.ABC):
         self, *, operation_id: uuid.UUID, finding_ids: Sequence[uuid.UUID], severity_order: Sequence[str] = ()
     ) -> list[Finding]:
         """
-        Read selected findings of one operation, highest severity first, then newest first.
+        Read selected findings of one operation in ``severity_order``, then newest first.
 
         IDs that are not in the operation are omitted.
 

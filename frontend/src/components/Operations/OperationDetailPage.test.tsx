@@ -459,7 +459,7 @@ it('shows configured rows and retired values on a finding card', async () => {
   expect(within(screen.getByRole('dialog')).getByRole('combobox', { name: 'Technique' })).toHaveValue('Other')
 })
 
-it('sends the retired values removed in the edit dialog, and none for a new finding', async () => {
+it('resends the kept retired values and lists the removed ones, and sends none for a new finding', async () => {
   const user = userEvent.setup()
   const legacy: FindingListItem = {
     ...FINDING, field_values: { harm_type: 'Malware', contoso_ticket: 'CONTOSO-42', retired_owner: 'Contoso' },
@@ -473,7 +473,7 @@ it('sends the retired values removed in the edit dialog, and none for a new find
   await user.click(within(confirmation).getByRole('button', { name: 'Remove' }))
   await user.click(await screen.findByRole('button', { name: 'Save finding' }))
   await waitFor(() => expect(operationsApi.updateFinding).toHaveBeenCalledWith('op-1', FINDING.id, {
-    title: FINDING.title, severity: 'informational', field_values: { harm_type: 'Malware' },
+    title: FINDING.title, severity: 'informational', field_values: { harm_type: 'Malware', retired_owner: 'Contoso' },
     remove_retired_keys: ['contoso_ticket'],
   }))
 

@@ -4,8 +4,10 @@ import { operationsApi } from '@/services/api'
 import { toApiError } from '@/services/errors'
 import type { FindingFields } from '@/types'
 
+import { useRuntime } from './useRuntime'
+
 interface FindingFieldsState {
-  /** Null until the fields load. */
+  /** Null until the fields first load. A reload keeps the last fields until the new ones arrive. */
   readonly fields: FindingFields | null
   /** The last load failure, or an empty string. */
   readonly error: string
@@ -13,10 +15,12 @@ interface FindingFieldsState {
 }
 
 /**
- * Loads the active finding fields, for the finding dialog, cards and counts.
+ * Loads the active finding fields, for the finding dialog, cards and counts, and again when the runtime
+ * generation changes, because a live apply can change them.
  * @param enabled - Loads only while true, and again each time it turns true, so a closed dialog fetches nothing.
  */
 export function useFindingFields(enabled = true): FindingFieldsState {
+  const { generation } = useRuntime()
   const [fields, setFields] = useState<FindingFields | null>(null)
   const [error, setError] = useState('')
   const [attempt, setAttempt] = useState(0)
@@ -37,7 +41,7 @@ export function useFindingFields(enabled = true): FindingFieldsState {
     return () => {
       ignore = true
     }
-  }, [attempt, enabled])
+  }, [attempt, enabled, generation])
 
   const retry = useCallback(() => {
     setError('')

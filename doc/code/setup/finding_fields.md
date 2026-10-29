@@ -15,7 +15,7 @@ Without any configuration, findings use these fields:
 To use other fields, subclass `FindingsInitializer` and return a `FindingFields` from `get_finding_fields`. The `severity` slot is always a required choice field. The fields in `fields` follow it in the dialog.
 
 ```python
-from pyrit.models.finding_fields import FindingField, FindingFields, FindingFieldType, FindingSeverityColor
+from pyrit.models import FindingField, FindingFields, FindingFieldType, FindingSeverityColor
 from pyrit.setup.initializers import FindingsInitializer
 
 
@@ -74,7 +74,7 @@ With `allow_custom_initializers: true`, the backend runs every script in that so
 
 ## Rules
 
-- Use one `FindingsInitializer` per deployment. If the configuration lists two, or the fields are invalid, the backend doesn't start. A live apply reports invalid configuration instead, and the running fields don't change.
+- Use one `FindingsInitializer` per deployment. If the configuration lists two, or the fields are invalid, setup fails when the backend starts. The backend still runs, but it blocks runtime operations, including findings, until a process restart. Configuration repair stays available. A live apply reports invalid configuration instead, and the running fields don't change.
 - Change a field's `label` to rename what people see.
 - A changed `key` makes a new field. Values saved under the old key show under **Retired fields**, where they are read-only. Edits keep them. **Remove** deletes one when you save.
 - Other text that matches an option's key or label is rejected, ignoring case and surrounding spaces. The message names the option to choose instead.

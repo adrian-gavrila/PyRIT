@@ -63,7 +63,8 @@ class FindingCreateRequest(FindingCreate):
     """
     A finding to record, optionally with one saved attack result as evidence.
 
-    Sending the same ``id`` and content again returns the saved finding, so a client can retry safely.
+    Sending the same ``id`` and content again returns the saved finding, as long as it still fits the active finding
+    fields, so a client can retry safely.
     """
 
     id: UUID | None = None
@@ -74,7 +75,7 @@ class FindingUpdateRequest(FindingCreate):
     """A finding's new editable values, and any retired values to remove."""
 
     remove_retired_keys: list[str] = Field(
-        default_factory=list, description="Retired values to delete from the finding"
+        default_factory=list, description="Keys of the retired values to delete from the finding"
     )
 
 

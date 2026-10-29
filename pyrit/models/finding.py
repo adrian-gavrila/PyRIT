@@ -13,8 +13,10 @@ class FindingCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     title: str
-    severity: str
-    field_values: dict[str, str] = {}
+    severity: str = Field(description="The key of a severity option, or Other text")
+    field_values: dict[str, str] = Field(
+        {}, description="Values by field or level key, each an option's key or text; blank values are dropped"
+    )
 
     @field_validator("title", "severity")
     @classmethod

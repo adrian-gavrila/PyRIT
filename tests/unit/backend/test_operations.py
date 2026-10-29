@@ -33,7 +33,7 @@ from pyrit.models import (
     Operation,
     Score,
 )
-from pyrit.setup.finding_fields import set_active_finding_fields
+from pyrit.setup.finding_fields import reset_active_finding_fields, set_active_finding_fields
 
 pytestmark = pytest.mark.usefixtures("patch_central_database")
 
@@ -477,6 +477,26 @@ async def test_update_removes_a_listed_retired_value_async(
     stored = await sqlite_instance.get_finding_async(operation_id=finding.operation_id, finding_id=finding.id)
     assert stored is not None
     assert stored.field_values == {"steps": "1. Open"}
+
+
+async def test_update_keeps_a_current_value_that_a_stale_client_resends_async(
+    sqlite_instance: SQLiteMemory, retired_value_finding_async: Finding, compatibility_headers: dict[str, str]
+) -> None:
+    finding = retired_value_finding_async
+    # A live apply makes ``description`` current again, while the client still shows it as retired.
+    reset_active_finding_fields()
+    description = FindingField(key="description", label="Description", type="multiline")
+    set_active_finding_fields(
+        finding_fields=FindingFields(severity=CONTOSO.severity, fields=[*CONTOSO.fields, description]), source="test"
+    )
+    response = TestClient(app, headers=compatibility_headers).put(
+        f"/api/operations/{finding.operation_id}/findings/{finding.id}",
+        json={"title": "Leak", "severity": "sev1", "field_values": {"steps": "1. Open", "description": "Old text"}},
+    )
+    assert response.status_code == 200
+    stored = await sqlite_instance.get_finding_async(operation_id=finding.operation_id, finding_id=finding.id)
+    assert stored is not None
+    assert stored.field_values == {"steps": "1. Open", "description": "Old text"}
 
 
 async def test_update_keeps_an_unchanged_severity_that_is_no_longer_an_option_async(

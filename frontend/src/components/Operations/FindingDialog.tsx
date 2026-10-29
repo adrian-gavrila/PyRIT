@@ -24,12 +24,13 @@ export interface FindingSaveAttempt {
   attackResultId: string
 }
 
-/** The finding Save sends. Only an edit lists the retired values to delete. */
+/** The finding Save sends. An edit also resends its kept retired values unchanged, and lists the keys to delete. */
 export interface FindingDraft extends FindingCreate {
   removeRetiredKeys?: string[]
 }
 
 interface FindingDialogProps {
+  /** Read once, when the dialog opens. A reload while it's open doesn't change its inputs or retired values. */
   fields: FindingFields
   initialValues?: FindingCreate
   editing?: boolean
@@ -73,6 +74,12 @@ function filledFinding(draft: FindingCreate): FindingCreate {
   return { title: draft.title, severity: draft.severity, field_values: Object.fromEntries(filled) }
 }
 
+/** The retired values an edit keeps and resends unchanged: all but the removed ones, whose keys it never sends. */
+function keptValues(retired: RetiredValue[], removed: ReadonlySet<string>): Record<string, string> {
+  const kept = retired.filter(({ key }: RetiredValue) => !removed.has(key))
+  return Object.fromEntries(kept.map(({ key, value }: RetiredValue) => [key, value]))
+}
+
 function sameFinding(left: FindingCreate, right: FindingCreate): boolean {
   const leftValues = Object.entries(filledFinding(left).field_values)
   const rightValues = filledFinding(right).field_values
@@ -91,7 +98,8 @@ export default function FindingDialog({
   fields, initialValues, editing = false, context, evidenceField = false, saveDisabled = false, onSave, onClose,
 }: FindingDialogProps) {
   const styles = useFindingDialogStyles()
-  const [opening] = useState(() => openingState(fields, initialValues))
+  const [openFields] = useState(fields)
+  const [opening] = useState(() => openingState(openFields, initialValues))
   const [draft, setDraft] = useState<FindingCreate>(opening.draft)
   const [removed, setRemoved] = useState<ReadonlySet<string>>(NO_KEYS)
   // Whether each field shows Other with blank text, which leaves its value '' just like Not set.
@@ -101,10 +109,10 @@ export default function FindingDialog({
   const [saving, setSaving] = useState(false)
   const submitting = useRef(false)
   const attempt = useRef<{ signature: string; id: string } | null>(null)
-  const slots = [fields.severity, ...fields.fields]
+  const slots = [openFields.severity, ...openFields.fields]
   const values = { ...draft.field_values, [SEVERITY_KEY]: draft.severity }
   const canSave = !saveDisabled && Boolean(draft.title.trim())
-    && firstMissingRequired(fields, draft.severity, draft.field_values) === null
+    && firstMissingRequired(openFields, draft.severity, draft.field_values) === null
     && !Object.values(blankOther).some(Boolean)
   const changed = !sameFinding(draft, opening.draft) || removed.size > 0 || attackResultId !== ''
 
@@ -128,10 +136,15 @@ export default function FindingDialog({
     setSaving(true)
     setError('')
     const trimmedAttackResultId = attackResultId.trim()
-    // The backend keeps retired values on its own, so an edit sends only the keys to delete.
+    // The server clears a current field left out, and its fields may differ from those this dialog opened with.
+    const filled = filledFinding(draft)
     const finding: FindingDraft = editing
-      ? { ...filledFinding(draft), removeRetiredKeys: [...removed] }
-      : filledFinding(draft)
+      ? {
+        ...filled,
+        field_values: { ...keptValues(opening.retired, removed), ...filled.field_values },
+        removeRetiredKeys: [...removed],
+      }
+      : filled
     const signature = JSON.stringify([finding, trimmedAttackResultId])
     if (attempt.current?.signature !== signature) attempt.current = { signature, id: generateClientId() }
     try {

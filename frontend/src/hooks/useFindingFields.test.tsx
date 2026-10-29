@@ -8,13 +8,18 @@ import { CONTOSO_FINDING_FIELDS, DEFAULT_FINDING_FIELDS_FIXTURE } from '@/test-u
 import type { FindingFields } from '@/types'
 
 import { useFindingFields } from './useFindingFields'
+import { useRuntime } from './useRuntime'
 
 jest.mock('@/services/api', () => ({ operationsApi: { getFindingFields: jest.fn() } }))
+jest.mock('./useRuntime', () => ({ useRuntime: jest.fn() }))
 const mockGetFindingFields = jest.mocked(operationsApi.getFindingFields)
+const mockRuntime = jest.mocked(useRuntime)
 
 describe('useFindingFields', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    mockGetFindingFields.mockReset()
+    mockRuntime.mockReturnValue({ ready: true, state: 'ready', generation: 'one' })
   })
 
   it('loads the finding fields once', async () => {
@@ -27,6 +32,23 @@ describe('useFindingFields', () => {
     rerender()
     expect(result.current.error).toBe('')
     expect(mockGetFindingFields).toHaveBeenCalledTimes(1)
+  })
+
+  it('loads the fields again when the runtime generation changes, keeping the last ones meanwhile', async () => {
+    const reloaded = deferred<FindingFields>()
+    mockGetFindingFields.mockResolvedValueOnce(DEFAULT_FINDING_FIELDS_FIXTURE).mockReturnValueOnce(reloaded.promise)
+
+    const { result, rerender } = renderHook(() => useFindingFields())
+    await waitFor(() => expect(result.current.fields).toBe(DEFAULT_FINDING_FIELDS_FIXTURE))
+
+    mockRuntime.mockReturnValue({ ready: true, state: 'ready', generation: 'two' })
+    rerender()
+    expect(mockGetFindingFields).toHaveBeenCalledTimes(2)
+    expect(result.current.fields).toBe(DEFAULT_FINDING_FIELDS_FIXTURE)
+
+    await act(async () => { reloaded.resolve(CONTOSO_FINDING_FIELDS) })
+    expect(result.current.fields).toBe(CONTOSO_FINDING_FIELDS)
+    expect(result.current.error).toBe('')
   })
 
   it('reports a load failure and retries', async () => {
@@ -73,6 +95,9 @@ describe('useFindingFields', () => {
     rerender({ enabled: true })
     await waitFor(() => expect(result.current.error).toBe('The Contoso backend is unavailable.'))
     rerender({ enabled: false })
+    mockRuntime.mockReturnValue({ ready: true, state: 'ready', generation: 'two' })
+    rerender({ enabled: false })
+    expect(mockGetFindingFields).toHaveBeenCalledTimes(1)
     rerender({ enabled: true })
     await waitFor(() => expect(result.current.fields).toBe(CONTOSO_FINDING_FIELDS))
     expect(result.current.error).toBe('')
