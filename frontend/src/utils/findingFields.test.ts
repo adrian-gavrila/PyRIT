@@ -1,5 +1,5 @@
 import { CONTOSO_FINDING_FIELDS, DEFAULT_FINDING_FIELDS_FIXTURE } from '@/test-utils/findingFieldsFixtures'
-import type { FindingField, FindingFieldOption } from '@/types'
+import type { FindingField, FindingFieldOption, FindingFields } from '@/types'
 
 import {
   choiceLevels,
@@ -21,6 +21,15 @@ function contosoField(key: string): FindingField {
 
 function optionKeys(options: FindingFieldOption[]): string[] {
   return options.map((option: FindingFieldOption) => option.key)
+}
+
+// Field and level keys such as `constructor` pass the backend's key pattern, and option keys can be any text.
+const PROTOTYPE_KEY_FIELDS: FindingFields = {
+  severity: {
+    ...DEFAULT_FINDING_FIELDS_FIXTURE.severity,
+    options: [...DEFAULT_FINDING_FIELDS_FIXTURE.severity.options, { key: 'toString', label: 'To string', children: [] }],
+  },
+  fields: [{ ...contosoField('category'), key: 'constructor', label: 'Constructor' }],
 }
 
 describe('findingFields', () => {
@@ -139,5 +148,16 @@ describe('findingFields', () => {
       { key: 'sev2', label: 'Sev 2', color: 'warning', count: 1, tooltip: null },
     ])
     expect(severityCountBadges(CONTOSO_FINDING_FIELDS, {})).toEqual([])
+  })
+
+  it('ignores inherited members when a key names an Object.prototype member', () => {
+    const constructorField = PROTOTYPE_KEY_FIELDS.fields[0]
+    expect(severityBadge(PROTOTYPE_KEY_FIELDS, 'toString')).toEqual({ label: 'To string', color: 'subtle' })
+    expect(levelOptions(constructorField, {}, 1)).toEqual([])
+    expect(describeFindingValues(PROTOTYPE_KEY_FIELDS, 'toString', {})).toEqual({ rows: [], retired: [] })
+    expect(firstMissingRequired(PROTOTYPE_KEY_FIELDS, 'toString', {})).toBe('Constructor')
+    expect(severityCountBadges(PROTOTYPE_KEY_FIELDS, { low: 1 })).toEqual([
+      { key: 'low', label: 'Low', color: 'informative', count: 1, tooltip: null },
+    ])
   })
 })

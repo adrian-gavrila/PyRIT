@@ -123,6 +123,25 @@ def test_upgrade_moves_existing_findings_into_field_values() -> None:
         engine.dispose()
 
 
+def test_upgrade_moves_an_other_severity_stored_in_any_case() -> None:
+    engine = sa.create_engine("sqlite:///:memory:")
+    try:
+        with engine.begin() as connection:
+            config = _config_for(connection)
+            command.upgrade(config, PREVIOUS_REVISION)
+            _insert_operation(connection)
+            # SQL Server's default case-insensitive collation let the old checks accept 'Other'.
+            connection.execute(sa.text("PRAGMA ignore_check_constraints = ON"))
+            _insert_finding(connection=connection, id=A, severity="Other", severity_other="Sev 2.5", description="")
+            connection.execute(sa.text("PRAGMA ignore_check_constraints = OFF"))
+
+            command.upgrade(config, REVISION)
+
+            assert connection.execute(sa.text("SELECT severity FROM FindingEntries")).scalar_one() == "Sev 2.5"
+    finally:
+        engine.dispose()
+
+
 def test_upgrade_drops_the_finding_check_constraints() -> None:
     engine = sa.create_engine("sqlite:///:memory:")
     try:
@@ -179,6 +198,7 @@ def test_upgrade_compiles_for_sql_server() -> None:
     drops = [match.start() for match in re.finditer("DROP CONSTRAINT", ddl)]
     assert len(drops) == 3 and max(drops) < ddl.index("ALTER COLUMN severity")
     assert "COLLATE Latin1_General_100_BIN2" in ddl
+    assert "WHERE LOWER(severity) = 'other'" in ddl
     assert "JSON_MODIFY" in ddl
     for column in ("description", "severity_other", "harm_type", "harm_type_other"):
         assert f"DROP COLUMN {column}" in ddl

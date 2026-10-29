@@ -294,7 +294,7 @@ describe('FindingDialog', () => {
 
   it('shows a rejected Other text in the error message bar and keeps the draft', async () => {
     const user = userEvent.setup()
-    const detail = 'Severity \'Critical\' matches the option \'critical\'. Send \'critical\' instead.'
+    const detail = 'Severity \'Critical\' matches the option \'Critical\' (key \'critical\'). Choose that option instead.'
     const onSave = jest.fn().mockRejectedValueOnce({ isAxiosError: true, response: { status: 422, data: { detail } } })
     renderDialog({ onSave })
     await user.type(screen.getByRole('textbox', { name: 'Title' }), 'Typed severity')

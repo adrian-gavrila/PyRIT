@@ -42,6 +42,11 @@ function filled(value: string | undefined): string | null {
   return value !== undefined && value.trim() !== '' ? value : null
 }
 
+/** The value stored under a configured key, ignoring `Object.prototype` members such as `constructor`. */
+export function ownValue<T>(record: Readonly<Record<string, T>>, key: string): T | undefined {
+  return Object.prototype.hasOwnProperty.call(record, key) ? record[key] : undefined
+}
+
 function allFields(fields: FindingFields): FindingField[] {
   return [fields.severity, ...fields.fields]
 }
@@ -50,7 +55,7 @@ function allFields(fields: FindingFields): FindingField[] {
 export function severityBadge(fields: FindingFields, severity: string): { label: string; color: BadgeColor } {
   const match = fields.severity.options.find((option: FindingFieldOption) => option.key === severity)
   if (match === undefined) return { label: severity, color: FLUENT_BADGE_COLOR.neutral }
-  return { label: match.label, color: FLUENT_BADGE_COLOR[fields.severity.colors[severity] ?? 'neutral'] }
+  return { label: match.label, color: FLUENT_BADGE_COLOR[ownValue(fields.severity.colors, severity) ?? 'neutral'] }
 }
 
 /** The field itself, then each of its levels: one entry per dropdown of a choice field. */
@@ -70,7 +75,7 @@ export function choiceLevels(field: FindingField): Array<{ key: string; label: s
 export function levelOptions(field: FindingField, values: Record<string, string>, depth: number): FindingFieldOption[] {
   let options = field.options
   for (const level of choiceLevels(field).slice(0, depth)) {
-    const value = filled(values[level.key])
+    const value = filled(ownValue(values, level.key))
     const match = options.find((option: FindingFieldOption) => option.key === value)
     if (match === undefined) return []
     options = match.children
@@ -108,7 +113,7 @@ export function describeFindingValues(
   for (const field of allFields(fields)) {
     for (const [depth, level] of choiceLevels(field).entries()) {
       if (field === fields.severity && depth === 0) continue
-      const value = filled(fieldValues[level.key])
+      const value = filled(ownValue(fieldValues, level.key))
       if (value === null) continue
       rows.push({
         key: level.key,
@@ -128,7 +133,7 @@ export function describeFindingValues(
 function firstMissingLevel(field: FindingField, values: Record<string, string>): string | null {
   for (const [depth, level] of choiceLevels(field).entries()) {
     if (levelOptions(field, values, depth).length === 0) return null
-    if (filled(values[level.key]) === null) return level.label
+    if (filled(ownValue(values, level.key)) === null) return level.label
   }
   return null
 }
@@ -149,7 +154,7 @@ export function firstMissingRequired(
     if (field.type === 'choice') {
       const missing = firstMissingLevel(field, values)
       if (missing !== null) return missing
-    } else if (filled(values[field.key]) === null) {
+    } else if (filled(ownValue(values, field.key)) === null) {
       return field.label
     }
   }
@@ -160,7 +165,7 @@ export function firstMissingRequired(
 export function severityCountBadges(fields: FindingFields, counts: Record<string, number>): SeverityCountBadge[] {
   const badges: SeverityCountBadge[] = []
   for (const option of fields.severity.options) {
-    const count = counts[option.key] ?? 0
+    const count = ownValue(counts, option.key) ?? 0
     if (count > 0) badges.push({ key: option.key, ...severityBadge(fields, option.key), count, tooltip: null })
   }
   const optionKeys = new Set(fields.severity.options.map((option: FindingFieldOption) => option.key))

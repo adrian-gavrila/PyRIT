@@ -368,4 +368,22 @@ describe('FindingFieldInput', () => {
     expect(screen.getByRole('combobox', { name: 'Component' })).toBeDisabled()
     expect(screen.getByRole('combobox', { name: 'Capability' })).toBeDisabled()
   })
+
+  it('ignores inherited members for a field keyed constructor and an option keyed toString', async () => {
+    const user = userEvent.setup()
+    const field: FindingField = {
+      ...TECHNIQUE, key: 'constructor', label: 'Constructor', options: [option('toString', 'To string')],
+    }
+    render(<TestWrapper>
+      <FieldHarness field={field} initialValues={{}} onChange={onChange} />
+      <FindingFieldInput field={{ ...OWNER, key: 'constructor' }} values={{}} onChange={onChange} />
+    </TestWrapper>)
+
+    expect(screen.getByRole('combobox', { name: 'Constructor' })).toHaveValue('')
+    expect(screen.queryByRole('textbox', { name: 'Other Constructor' })).not.toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Owner' })).toHaveValue('')
+    await pick(user, 'Constructor', 'To string')
+    expect(onChange).toHaveBeenLastCalledWith({ constructor: 'toString' })
+    expect(screen.getByRole('combobox', { name: 'Constructor' })).toHaveValue('To string')
+  })
 })

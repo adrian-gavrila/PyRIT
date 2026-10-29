@@ -1,6 +1,7 @@
 import { type RefObject, useEffect, useId, useRef, useState, type JSX } from 'react'
 import {
   Button, Dialog, DialogActions, DialogBody, DialogContent, DialogSurface, DialogTitle, Link, Text,
+  useRestoreFocusTarget,
 } from '@fluentui/react-components'
 
 import { useRetiredFieldValuesStyles } from './RetiredFieldValues.styles'
@@ -33,6 +34,9 @@ export default function RetiredFieldValues({
   const headingId = useId()
   // The key stays set while the dialog closes, so its title doesn't lose the key during the exit animation.
   const [confirming, setConfirming] = useState({ key: '', open: false })
+  // The confirmation dialog opens from state rather than a DialogTrigger. Mark each Remove button so Tabster
+  // can return focus to it when the dialog is cancelled.
+  const restoreFocusTarget = useRestoreFocusTarget()
   const undoRef = useRef<HTMLButtonElement>(null)
   const firstRemoveRef = useRef<HTMLButtonElement>(null)
   const focusAfterChange = useRef<RefObject<HTMLButtonElement | null> | null>(null)
@@ -61,8 +65,8 @@ export default function RetiredFieldValues({
                 <code className={styles.key} translate="no">{key}</code>
                 <Text as="p" className={styles.value}>{value}</Text>
               </div>
-              <Button ref={index === 0 ? firstRemoveRef : undefined} size="small" className={styles.button}
-                disabled={disabled} aria-label={`Remove retired value ${key}`}
+              <Button {...restoreFocusTarget} ref={index === 0 ? firstRemoveRef : undefined} size="small"
+                className={styles.button} disabled={disabled} aria-label={`Remove retired value ${key}`}
                 onClick={() => { setConfirming({ key, open: true }) }}>Remove</Button>
             </li>
           ))}

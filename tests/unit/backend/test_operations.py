@@ -223,7 +223,9 @@ def test_finding_create_rejects_other_text_that_matches_an_option(compatibility_
     path = f"/api/operations/{operation_id}/findings"
     rejected = client.post(path, json={"title": "Leak", "severity": "Critical"})
     assert rejected.status_code == 422
-    assert rejected.json()["detail"] == "Severity 'Critical' matches the option 'critical'. Send 'critical' instead."
+    assert rejected.json()["detail"] == (
+        "Severity 'Critical' matches the option 'Critical' (key 'critical'). Choose that option instead."
+    )
     assert client.get(path).json()["items"] == []
 
 
@@ -411,22 +413,6 @@ def test_finding_mutations_reject_wrong_operations_and_invalid_fields(
     assert client.get(path).json()["items"] == [{**original, "evidence_count": 0}]
 
 
-@pytest.fixture
-async def retired_value_finding_async(sqlite_instance: SQLiteMemory, reset_finding_fields: None) -> Finding:
-    """Seed a finding with a ``description`` value, then make CONTOSO, which has no such field, active."""
-    operation = await sqlite_instance.add_operation_async(Operation(name="Contoso"))
-    finding = await sqlite_instance.add_finding_async(
-        finding=Finding(
-            operation_id=operation.id,
-            title="Leak",
-            severity="sev1",
-            field_values={"steps": "1. Open", "description": "Old text"},
-        )
-    )
-    set_active_finding_fields(finding_fields=CONTOSO, source="test")
-    return finding
-
-
 async def test_update_keeps_an_unchanged_retired_value_async(
     sqlite_instance: SQLiteMemory, retired_value_finding_async: Finding, compatibility_headers: dict[str, str]
 ) -> None:
@@ -491,6 +477,36 @@ async def test_update_removes_a_listed_retired_value_async(
     stored = await sqlite_instance.get_finding_async(operation_id=finding.operation_id, finding_id=finding.id)
     assert stored is not None
     assert stored.field_values == {"steps": "1. Open"}
+
+
+async def test_update_keeps_an_unchanged_severity_that_is_no_longer_an_option_async(
+    sqlite_instance: SQLiteMemory, unmatched_severity_finding_async: Finding, compatibility_headers: dict[str, str]
+) -> None:
+    finding = unmatched_severity_finding_async
+    response = TestClient(app, headers=compatibility_headers).put(
+        f"/api/operations/{finding.operation_id}/findings/{finding.id}",
+        json={"title": "Leak", "severity": "low", "field_values": {"steps": "1. Open"}},
+    )
+    assert response.status_code == 200
+    assert response.json()["severity"] == "low"
+    stored = await sqlite_instance.get_finding_async(operation_id=finding.operation_id, finding_id=finding.id)
+    assert stored is not None
+    assert stored.severity == "low"
+
+
+async def test_update_rejects_changing_to_another_severity_that_is_not_an_option_async(
+    sqlite_instance: SQLiteMemory, unmatched_severity_finding_async: Finding, compatibility_headers: dict[str, str]
+) -> None:
+    finding = unmatched_severity_finding_async
+    response = TestClient(app, headers=compatibility_headers).put(
+        f"/api/operations/{finding.operation_id}/findings/{finding.id}",
+        json={"title": "Leak", "severity": "medium", "field_values": {"steps": "1. Open"}},
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Severity has no option 'medium'."
+    stored = await sqlite_instance.get_finding_async(operation_id=finding.operation_id, finding_id=finding.id)
+    assert stored is not None
+    assert stored.severity == "low"
 
 
 @pytest.fixture

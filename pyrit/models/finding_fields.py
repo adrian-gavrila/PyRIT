@@ -593,7 +593,8 @@ def _check_other_text(*, label: str, value: str, options: list[FindingFieldOptio
     for option in options:
         if folded in (option.key.strip().casefold(), option.label.strip().casefold()):
             raise FindingValuesError(
-                f"{label} {value!r} matches the option {option.key!r}. Send {option.key!r} instead."
+                f"{label} {value!r} matches the option {option.label!r} (key {option.key!r}). "
+                "Choose that option instead."
             )
 
 

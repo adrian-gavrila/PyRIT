@@ -18,8 +18,17 @@ from pyrit.backend.services.dataset_service import get_dataset_service
 from pyrit.backend.services.manual_send_scheduler import get_manual_send_scheduler
 from pyrit.backend.services.message_send_service import get_message_send_service
 from pyrit.memory import SQLiteMemory
+from pyrit.models import Finding, FindingField, FindingFields, Operation
+from pyrit.setup.finding_fields import set_active_finding_fields
 from test_support.fixtures import authentication_policy, compatibility_headers, compatibility_id  # noqa: F401
 from unit.async_utils import TEST_WATCHDOG_SECONDS
+
+_CONTOSO_FIELDS = FindingFields(
+    severity=FindingField(
+        key="severity", label="Severity", type="choice", options=[("sev1", "Sev 1"), ("sev2", "Sev 2")]
+    ),
+    fields=[FindingField(key="steps", label="Steps to reproduce", type="multiline", required=True)],
+)
 
 
 @pytest.fixture
@@ -57,3 +66,30 @@ def isolated_manual_message_services() -> Iterator[None]:
     yield
     for factory in (get_attack_service, get_message_send_service, get_manual_send_scheduler, get_dataset_service):
         factory.cache_clear()
+
+
+@pytest.fixture
+async def retired_value_finding_async(sqlite_instance: SQLiteMemory, reset_finding_fields: None) -> Finding:
+    """Seed a finding with ``steps`` and ``description`` values, then make fields without ``description`` active."""
+    return await _seed_contoso_finding_async(
+        sqlite_instance=sqlite_instance, severity="sev1", field_values={"steps": "1. Open", "description": "Old text"}
+    )
+
+
+@pytest.fixture
+async def unmatched_severity_finding_async(sqlite_instance: SQLiteMemory, reset_finding_fields: None) -> Finding:
+    """Seed a finding with severity ``low``, then make fields without a ``low`` severity option active."""
+    return await _seed_contoso_finding_async(
+        sqlite_instance=sqlite_instance, severity="low", field_values={"steps": "1. Open"}
+    )
+
+
+async def _seed_contoso_finding_async(
+    *, sqlite_instance: SQLiteMemory, severity: str, field_values: dict[str, str]
+) -> Finding:
+    operation = await sqlite_instance.add_operation_async(Operation(name="Contoso"))
+    finding = await sqlite_instance.add_finding_async(
+        finding=Finding(operation_id=operation.id, title="Leak", severity=severity, field_values=field_values)
+    )
+    set_active_finding_fields(finding_fields=_CONTOSO_FIELDS, source="test")
+    return finding

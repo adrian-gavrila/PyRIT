@@ -383,22 +383,25 @@ def test_check_values_rejects(
         pytest.param(
             "Critical",
             {},
-            "Severity 'Critical' matches the option 'critical'. Send 'critical' instead.",
+            "Severity 'Critical' matches the option 'Critical' (key 'critical'). Choose that option instead.",
             id="severity label",
         ),
         pytest.param(
             "CRITICAL",
             {},
-            "Severity 'CRITICAL' matches the option 'critical'. Send 'critical' instead.",
+            "Severity 'CRITICAL' matches the option 'Critical' (key 'critical'). Choose that option instead.",
             id="severity key in capitals",
         ),
         pytest.param(
-            "low ", {}, "Severity 'low ' matches the option 'low'. Send 'low' instead.", id="severity key with a space"
+            "low ",
+            {},
+            "Severity 'low ' matches the option 'Low' (key 'low'). Choose that option instead.",
+            id="severity key with a space",
         ),
         pytest.param(
             "low",
             {"harm_type": "malware"},
-            "Harm-type 'malware' matches the option 'Malware'. Send 'Malware' instead.",
+            "Harm-type 'malware' matches the option 'Malware' (key 'Malware'). Choose that option instead.",
             id="harm type key in lowercase",
         ),
     ],

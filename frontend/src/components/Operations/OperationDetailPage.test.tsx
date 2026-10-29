@@ -401,7 +401,7 @@ it.each(['Cancel', 'Escape'])('discards edits with %s and restores the edit butt
 
 it('retains an edited draft on update failure and shows why the backend rejected it', async () => {
   const user = userEvent.setup()
-  const detail = 'Severity \'Critical\' matches the option \'critical\'. Send \'critical\' instead.'
+  const detail = 'Severity \'Critical\' matches the option \'Critical\' (key \'critical\'). Choose that option instead.'
   jest.mocked(operationsApi.listFindings).mockResolvedValue({ ...EMPTY, items: [FINDING] })
   jest.mocked(operationsApi.updateFinding).mockRejectedValue({
     isAxiosError: true, response: { status: 422, data: { detail } },

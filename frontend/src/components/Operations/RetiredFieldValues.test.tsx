@@ -143,6 +143,31 @@ describe('RetiredFieldValues', () => {
     expect(await screen.findByRole('button', { name: 'Undo' })).toHaveFocus()
   })
 
+  // jsdom fires no focusout when the dialog removes the focused button, so Tabster only restores focus here after
+  // keyboard use. The e2e spec covers a mouse click on Keep it.
+  it('returns focus to the Remove button on Keep it', async () => {
+    const user = userEvent.setup()
+    render(<TestWrapper><RetiredFieldValuesHarness onRemove={jest.fn()} onUndo={jest.fn()} /></TestWrapper>)
+    const removeButton = screen.getByRole('button', { name: removeButtonName('contoso_ticket') })
+    await user.click(removeButton)
+    const dialog = await findConfirmation('contoso_ticket')
+    expect(within(dialog).getByRole('button', { name: 'Keep it' })).toHaveFocus()
+    await user.keyboard('{Enter}')
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    await waitFor(() => expect(removeButton).toHaveFocus())
+  })
+
+  it('returns focus to the Remove button on Escape', async () => {
+    const user = userEvent.setup()
+    render(<TestWrapper><RetiredFieldValuesHarness onRemove={jest.fn()} onUndo={jest.fn()} /></TestWrapper>)
+    const removeButton = screen.getByRole('button', { name: removeButtonName('contoso_ticket') })
+    await user.click(removeButton)
+    await findConfirmation('contoso_ticket')
+    await user.keyboard('{Escape}')
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    await waitFor(() => expect(removeButton).toHaveFocus())
+  })
+
   it('moves focus to the first Remove button after Undo', async () => {
     const user = userEvent.setup()
     render(<TestWrapper><RetiredFieldValuesHarness onRemove={jest.fn()} onUndo={jest.fn()} /></TestWrapper>)

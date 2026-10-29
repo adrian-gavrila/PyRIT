@@ -2,7 +2,7 @@ import { useState, type JSX } from 'react'
 import { Combobox, Field, Input, Option, Textarea } from '@fluentui/react-components'
 
 import type { FindingField, FindingFieldOption } from '@/types'
-import { choiceLevels, levelOptions } from '@/utils/findingFields'
+import { choiceLevels, levelOptions, ownValue } from '@/utils/findingFields'
 
 import { useFindingFieldInputStyles } from './FindingFieldInput.styles'
 
@@ -50,7 +50,7 @@ interface LevelState {
 }
 
 function storedValue(values: Record<string, string>, key: string): string {
-  const value = values[key] ?? ''
+  const value = ownValue(values, key) ?? ''
   return value.trim() === '' ? '' : value
 }
 
@@ -185,7 +185,7 @@ function ChoiceFieldInput({
         )
       })}
       {otherChosen && <Field label={`${OTHER_TEXT} ${field.label}`} required>
-        <Input value={values[field.key] ?? ''} disabled={disabled} name={field.key} autoComplete="off"
+        <Input value={ownValue(values, field.key) ?? ''} disabled={disabled} name={field.key} autoComplete="off"
           onChange={(_, data) => {
             onOtherBlankChange?.(data.value.trim() === '')
             onChange({ [field.key]: data.value })
@@ -196,7 +196,7 @@ function ChoiceFieldInput({
 }
 
 function TextFieldInput({ field, values, disabled, onChange }: FieldControlProps): JSX.Element {
-  const value = values[field.key] ?? ''
+  const value = ownValue(values, field.key) ?? ''
   const report = (text: string): void => { onChange({ [field.key]: text }) }
   return (
     <Field label={field.label} hint={field.hint ?? undefined} required={field.required}>
