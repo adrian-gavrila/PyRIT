@@ -2239,7 +2239,7 @@ export interface FindingField {
   colors: Record<string, FindingSeverityColor>
   hint: string | null
   section: string | null
-  /** Shown on the dashboard but left out of exports. */
+  /** Shown on the dashboard but left out of the Word and Markdown exports. */
   internal: boolean
 }
 

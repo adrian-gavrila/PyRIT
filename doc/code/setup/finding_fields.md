@@ -55,7 +55,7 @@ A few things to note in this example:
 - Options are `(key, label)` pairs. The finding stores the `key`, and people see the `label`. Field and level keys use lowercase letters, digits and underscores. Option keys can be any text that isn't blank.
 - `Area` is a cascade. Each of its options maps to the options of a second dropdown. `levels` names that dropdown, and its value is stored under `subarea`.
 - `colors` sets the badge color of a severity option.
-- `internal=True` keeps `Contoso ticket` out of exports. The dashboard still shows it.
+- `internal=True` keeps `Contoso ticket` out of the Word and Markdown exports. The dashboard still shows it.
 
 `FindingField` also takes `hint`, `section` and `allow_other`. Its docstring describes each setting.
 

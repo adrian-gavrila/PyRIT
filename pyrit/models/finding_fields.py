@@ -64,7 +64,8 @@ class FindingField(BaseModel):
         colors (dict[str, FindingSeverityColor]): The severity slot's badge color for each top-level option.
         hint (str | None): Help text under the field in the finding dialog.
         section (str | None): A heading the finding dialog shows where the section changes.
-        internal (bool): Whether the field and its levels stay out of exports. The dashboard still shows them.
+        internal (bool): Whether the field and its levels stay out of the Word and Markdown exports. The dashboard
+            still shows them.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
