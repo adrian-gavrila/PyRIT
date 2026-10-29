@@ -7,6 +7,7 @@ from uuid import UUID
 from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, field_validator
 
 from pyrit.backend.models.attacks import ScoreView
+from pyrit.backend.models.common import MAX_ITEMS, IdentifierStr, TextStr
 from pyrit.models import (
     AttackOutcome,
     Finding,
@@ -59,7 +60,19 @@ class FindingListResponse(BaseModel):
     next_offset: int | None
 
 
-class FindingCreateRequest(FindingCreate):
+class _FindingRequestFields(FindingCreate):
+    """A finding's values as a request carries them, within the request limits."""
+
+    title: TextStr
+    severity: TextStr = Field(description="The key of a severity option, or Other text")
+    field_values: dict[IdentifierStr, TextStr] = Field(
+        default_factory=dict,
+        max_length=MAX_ITEMS,
+        description="Values by field or level key, each an option's key or text; blank values are dropped",
+    )
+
+
+class FindingCreateRequest(_FindingRequestFields):
     """
     A finding to record, optionally with one saved attack result as evidence.
 
@@ -71,11 +84,11 @@ class FindingCreateRequest(FindingCreate):
     attack_result_id: UUID | None = Field(None, description="A saved attack result to link as evidence")
 
 
-class FindingUpdateRequest(FindingCreate):
+class FindingUpdateRequest(_FindingRequestFields):
     """A finding's new editable values, and any retired values to remove."""
 
-    remove_retired_keys: list[str] = Field(
-        default_factory=list, description="Keys of the retired values to delete from the finding"
+    remove_retired_keys: list[IdentifierStr] = Field(
+        default_factory=list, max_length=MAX_ITEMS, description="Keys of the retired values to delete from the finding"
     )
 
 
