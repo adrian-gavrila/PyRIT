@@ -15,8 +15,8 @@ interface FindingFieldsState {
 }
 
 /**
- * Loads the active finding fields, for the finding dialog, cards and counts, and again when the runtime
- * generation changes, because a live apply can change them.
+ * Loads the active finding fields, and again when the runtime generation changes, because a live apply can
+ * change them.
  * @param enabled - Loads only while true, and again each time it turns true, so a closed dialog fetches nothing.
  */
 export function useFindingFields(enabled = true): FindingFieldsState {

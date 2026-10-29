@@ -1,6 +1,8 @@
+import type { BadgeProps } from '@fluentui/react-components'
+
 import type { FindingField, FindingFieldOption, FindingFields, FindingSeverityColor } from '@/types'
 
-export type BadgeColor = 'danger' | 'severe' | 'warning' | 'success' | 'brand' | 'informative' | 'important' | 'subtle'
+export type BadgeColor = NonNullable<BadgeProps['color']>
 
 export const FLUENT_BADGE_COLOR: Record<FindingSeverityColor, BadgeColor> = {
   red: 'danger',
@@ -13,7 +15,8 @@ export const FLUENT_BADGE_COLOR: Record<FindingSeverityColor, BadgeColor> = {
   neutral: 'subtle',
 }
 
-const SEVERITY_KEY = 'severity'
+/** The key under which the severity slot's own value travels with the other values. */
+export const SEVERITY_KEY = 'severity'
 
 export interface FindingValueRow {
   key: string
@@ -21,6 +24,11 @@ export interface FindingValueRow {
   /** The option label of a matching choice value, otherwise the stored text. */
   value: string
   multiline: boolean
+}
+
+export interface RetiredValue {
+  key: string
+  value: string
 }
 
 export interface SeverityCountBadge {
@@ -38,7 +46,8 @@ const OTHER_SEVERITY_BADGE: Pick<SeverityCountBadge, 'key' | 'label' | 'color'> 
   color: FLUENT_BADGE_COLOR.neutral,
 }
 
-function filled(value: string | undefined): string | null {
+/** The value, or null when it is missing or blank. */
+export function filled(value: string | undefined): string | null {
   return value !== undefined && value.trim() !== '' ? value : null
 }
 
@@ -47,13 +56,17 @@ export function ownValue<T>(record: Readonly<Record<string, T>>, key: string): T
   return Object.prototype.hasOwnProperty.call(record, key) ? record[key] : undefined
 }
 
+export function findOption(options: FindingFieldOption[], key: string | null): FindingFieldOption | undefined {
+  return options.find((option: FindingFieldOption) => option.key === key)
+}
+
 function allFields(fields: FindingFields): FindingField[] {
   return [fields.severity, ...fields.fields]
 }
 
 /** The severity's option label and badge color, or the stored text on a neutral badge when no option matches. */
 export function severityBadge(fields: FindingFields, severity: string): { label: string; color: BadgeColor } {
-  const match = fields.severity.options.find((option: FindingFieldOption) => option.key === severity)
+  const match = findOption(fields.severity.options, severity)
   if (match === undefined) return { label: severity, color: FLUENT_BADGE_COLOR.neutral }
   return { label: match.label, color: FLUENT_BADGE_COLOR[ownValue(fields.severity.colors, severity) ?? 'neutral'] }
 }
@@ -75,8 +88,7 @@ export function choiceLevels(field: FindingField): Array<{ key: string; label: s
 export function levelOptions(field: FindingField, values: Record<string, string>, depth: number): FindingFieldOption[] {
   let options = field.options
   for (const level of choiceLevels(field).slice(0, depth)) {
-    const value = filled(ownValue(values, level.key))
-    const match = options.find((option: FindingFieldOption) => option.key === value)
+    const match = findOption(options, filled(ownValue(values, level.key)))
     if (match === undefined) return []
     options = match.children
   }
@@ -93,10 +105,24 @@ export function fieldKeys(fields: FindingFields): Set<string> {
   return keys
 }
 
+/** Sets apart the stored values whose keys the active fields no longer define, keeping their stored order. */
+export function splitRetiredValues(
+  fields: FindingFields,
+  fieldValues: Record<string, string>,
+): { current: Record<string, string>; retired: RetiredValue[] } {
+  const known = fieldKeys(fields)
+  const current: Record<string, string> = {}
+  const retired: RetiredValue[] = []
+  for (const [key, value] of Object.entries(fieldValues)) {
+    if (known.has(key)) current[key] = value
+    else retired.push({ key, value })
+  }
+  return { current, retired }
+}
+
 function displayValue(field: FindingField, values: Record<string, string>, depth: number, value: string): string {
   if (field.type !== 'choice') return value
-  const match = levelOptions(field, values, depth).find((option: FindingFieldOption) => option.key === value)
-  return match?.label ?? value
+  return findOption(levelOptions(field, values, depth), value)?.label ?? value
 }
 
 /**
@@ -107,7 +133,7 @@ export function describeFindingValues(
   fields: FindingFields,
   severity: string,
   fieldValues: Record<string, string>,
-): { rows: FindingValueRow[]; retired: Array<{ key: string; value: string }> } {
+): { rows: FindingValueRow[]; retired: RetiredValue[] } {
   const values: Record<string, string> = { ...fieldValues, [SEVERITY_KEY]: severity }
   const rows: FindingValueRow[] = []
   for (const field of allFields(fields)) {
@@ -123,11 +149,7 @@ export function describeFindingValues(
       })
     }
   }
-  const known = fieldKeys(fields)
-  const retired = Object.entries(fieldValues)
-    .filter(([key]: [string, string]) => !known.has(key))
-    .map(([key, value]: [string, string]) => ({ key, value }))
-  return { rows, retired }
+  return { rows, retired: splitRetiredValues(fields, fieldValues).retired }
 }
 
 function firstMissingLevel(field: FindingField, values: Record<string, string>): string | null {

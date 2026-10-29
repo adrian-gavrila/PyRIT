@@ -486,8 +486,7 @@ class OperationService:
             FindingValuesError: If ``remove_retired_keys`` lists a key that isn't a retired value of the finding
                 or that is also sent.
         """
-        known = fields.field_keys
-        retired = {key: value for key, value in stored.field_values.items() if key not in known}
+        retired = dict(fields.describe_values(severity=stored.severity, field_values=stored.field_values).retired)
         for key in request.remove_retired_keys:
             if key not in retired:
                 raise FindingValuesError(f"{key!r} is not a retired value of this finding.")

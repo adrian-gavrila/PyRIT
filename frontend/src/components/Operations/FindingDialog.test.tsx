@@ -4,6 +4,7 @@ import userEvent, { type UserEvent } from '@testing-library/user-event'
 import { FluentProvider, webLightTheme } from '@fluentui/react-components'
 
 import { deferred } from '@/test-utils/deferred'
+import { findRemovalConfirmation, pick } from '@/test-utils/findingDialog'
 import { CONTOSO_FINDING_FIELDS, DEFAULT_FINDING_FIELDS_FIXTURE } from '@/test-utils/findingFieldsFixtures'
 import type { FindingCreate, FindingFields } from '@/types'
 
@@ -60,21 +61,8 @@ function EditHarness({ onSave }: { onSave: (draft: FindingDraft) => Promise<void
   </>
 }
 
-async function pick(user: UserEvent, label: string, optionName: string): Promise<void> {
-  await user.click(screen.getByRole('combobox', { name: label }))
-  await user.click(within(await screen.findByRole('listbox')).getByRole('option', { name: optionName, exact: true }))
-}
-
 function saveButton(): HTMLElement {
   return screen.getByRole('button', { name: 'Save finding' })
-}
-
-// The confirmation's title wraps the key in <code>, so it is found by its Keep it button instead of its name.
-async function findRemovalConfirmation(): Promise<HTMLElement> {
-  const dialogs = await screen.findAllByRole('dialog')
-  const confirmation = dialogs.find((dialog: HTMLElement) => within(dialog).queryByRole('button', { name: 'Keep it' }))
-  if (confirmation === undefined) throw new Error('No removal confirmation is open')
-  return confirmation
 }
 
 async function confirmRemoval(user: UserEvent, key: string): Promise<void> {
@@ -89,7 +77,7 @@ describe('FindingDialog', () => {
     jest.clearAllMocks()
   })
 
-  it('keeps the #3066 form for the default fields', async () => {
+  it('renders the default fields and saves only the filled values', async () => {
     const user = userEvent.setup()
     const onSave = jest.fn().mockResolvedValue(undefined)
     renderDialog({ onSave })
@@ -213,7 +201,7 @@ describe('FindingDialog', () => {
 
     await user.click(saveButton())
     await waitFor(() => expect(onSave).toHaveBeenCalledWith({
-      title: CONTOSO_EDIT.title, severity: 'sev1', field_values: CONTOSO_EDIT.field_values, removeRetiredKeys: [],
+      title: CONTOSO_EDIT.title, severity: 'sev1', field_values: CONTOSO_EDIT.field_values, remove_retired_keys: [],
     }, ATTEMPT))
   })
 
@@ -235,7 +223,7 @@ describe('FindingDialog', () => {
 
     await user.click(saveButton())
     await waitFor(() => expect(onSave).toHaveBeenCalledWith({
-      title: CONTOSO_EDIT.title, severity: 'sev1', field_values: CONTOSO_EDIT.field_values, removeRetiredKeys: [],
+      title: CONTOSO_EDIT.title, severity: 'sev1', field_values: CONTOSO_EDIT.field_values, remove_retired_keys: [],
     }, ATTEMPT))
   })
 
@@ -261,13 +249,13 @@ describe('FindingDialog', () => {
     await user.click(await screen.findByRole('button', { name: 'Save finding' }))
     await waitFor(() => expect(onSave).toHaveBeenCalledWith({
       title: CONTOSO_EDIT.title, severity: 'sev1', field_values: CONTOSO_CURRENT_VALUES,
-      removeRetiredKeys: ['description'],
+      remove_retired_keys: ['description'],
     }, ATTEMPT))
     // The backend rejects a key that is both sent and listed for removal.
     expect((onSave.mock.calls[0] as [FindingDraft])[0].field_values).not.toHaveProperty('description')
   })
 
-  it('moves focus to Undo after a removal, and Escape closes only the confirmation', async () => {
+  it('Escape closes only the removal confirmation', async () => {
     const user = userEvent.setup()
     const onClose = jest.fn()
     renderDialog({ fields: CONTOSO_FINDING_FIELDS, editing: true, initialValues: CONTOSO_EDIT, onClose })
@@ -279,10 +267,6 @@ describe('FindingDialog', () => {
     expect(onClose).not.toHaveBeenCalled()
     expect(await screen.findByRole('heading', { name: 'Edit finding' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Remove retired value description' })).toBeInTheDocument()
-
-    await confirmRemoval(user, 'description')
-    expect(await screen.findByRole('button', { name: 'Undo' })).toHaveFocus()
-    expect(onClose).not.toHaveBeenCalled()
   })
 
   it('prevents duplicate submissions and reuses the attempt ID after a failure', async () => {

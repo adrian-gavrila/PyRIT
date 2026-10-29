@@ -31,8 +31,6 @@ class FindingsInitializer(PyRITInitializer):
         """
         Report no default values or global variables without running ``initialize_async``.
 
-        The base class runs ``initialize_async`` to find out, which would change the active finding fields.
-
         Returns:
             dict[str, Any]: Empty ``default_values`` and ``global_variables`` lists.
         """

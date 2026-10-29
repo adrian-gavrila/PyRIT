@@ -2,7 +2,7 @@ import { useState, type JSX } from 'react'
 import { Combobox, Field, Input, Option, Textarea } from '@fluentui/react-components'
 
 import type { FindingField, FindingFieldOption } from '@/types'
-import { choiceLevels, levelOptions, ownValue } from '@/utils/findingFields'
+import { choiceLevels, filled, findOption, levelOptions, ownValue } from '@/utils/findingFields'
 
 import { useFindingFieldInputStyles } from './FindingFieldInput.styles'
 
@@ -49,20 +49,6 @@ interface LevelState {
   unavailable: boolean
 }
 
-function storedValue(values: Record<string, string>, key: string): string {
-  const value = ownValue(values, key) ?? ''
-  return value.trim() === '' ? '' : value
-}
-
-function isOption(options: FindingFieldOption[], value: string): boolean {
-  return options.some((option: FindingFieldOption) => option.key === value)
-}
-
-function levelHint(field: FindingField, depth: number, unmatched: boolean): string | undefined {
-  if (unmatched) return UNMATCHED_HINT
-  return depth === 0 ? field.hint ?? undefined : undefined
-}
-
 /**
  * What one dropdown of a choice field offers and shows. A stored value that isn't an option under its path is
  * listed as typed and stays selected, unless the field is showing Other text.
@@ -71,13 +57,13 @@ function levelState(field: FindingField, values: Record<string, string>, depth: 
   const levels = choiceLevels(field)
   const fieldOptions = levelOptions(field, values, depth)
   const options = fieldOptions.map((option: FindingFieldOption) => ({ value: option.key, text: option.label }))
-  const value = storedValue(values, levels[depth].key)
-  const unmatched = !otherChosen && value !== '' && !isOption(fieldOptions, value)
-  const parentBlank = depth > 0 && storedValue(values, levels[depth - 1].key) === ''
+  const value = filled(ownValue(values, levels[depth].key)) ?? ''
+  const unmatched = !otherChosen && value !== '' && findOption(fieldOptions, value) === undefined
+  const parentBlank = depth > 0 && filled(ownValue(values, levels[depth - 1].key)) === null
   return {
     options: unmatched ? [{ value, text: value }, ...options] : options,
     selected: otherChosen ? OTHER_VALUE : value,
-    hint: levelHint(field, depth, unmatched),
+    hint: unmatched ? UNMATCHED_HINT : depth === 0 ? field.hint ?? undefined : undefined,
     required: field.required && fieldOptions.length > 0,
     unavailable: depth > 0 && (parentBlank || (options.length === 0 && !unmatched)),
   }
@@ -95,8 +81,8 @@ function cascadeChanges(
   const next = { ...values, ...changes }
   for (const [lower, level] of levels.entries()) {
     if (lower <= depth) continue
-    const current = storedValue(next, level.key)
-    if (current === '' || isOption(levelOptions(field, next, lower), current)) continue
+    const current = filled(ownValue(next, level.key))
+    if (current === null || findOption(levelOptions(field, next, lower), current) !== undefined) continue
     changes[level.key] = ''
     next[level.key] = ''
   }
@@ -161,8 +147,8 @@ function ChoiceFieldInput({
   const levels = choiceLevels(field)
   const allowOther = field.allow_other && levels.length === 1
   const [otherChosen, setOtherChosen] = useState(() => {
-    const value = storedValue(values, field.key)
-    return allowOther && value !== '' && !isOption(field.options, value)
+    const value = filled(ownValue(values, field.key))
+    return allowOther && value !== null && findOption(field.options, value) === undefined
   })
 
   const select = (depth: number, optionValue: string): void => {
@@ -211,9 +197,7 @@ function TextFieldInput({ field, values, disabled, onChange }: FieldControlProps
 
 /**
  * The input for one finding field: a text box for a `text` or `multiline` field, and one searchable dropdown per
- * level for a `choice` field. Changing a cascade level clears each lower level that its new path doesn't offer.
- * A single-level choice with `allow_other` also takes typed Other text, and a stored value that isn't an option
- * stays selected until the user picks another.
+ * level for a `choice` field. A single-level choice with `allow_other` also takes typed Other text.
  */
 export default function FindingFieldInput({
   field, values, disabled = false, onChange, onOtherBlankChange,

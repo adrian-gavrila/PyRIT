@@ -1,10 +1,11 @@
 import { act, render, screen, waitFor, within } from '@testing-library/react'
-import userEvent, { type UserEvent } from '@testing-library/user-event'
+import userEvent from '@testing-library/user-event'
 import { FluentProvider, webLightTheme } from '@fluentui/react-components'
 import { MemoryRouter, Route, Routes } from 'react-router'
 
 import { attacksApi, operationsApi, scenariosApi } from '@/services/api'
 import { deferred } from '@/test-utils/deferred'
+import { findRemovalConfirmation, pick } from '@/test-utils/findingDialog'
 import { CONTOSO_FINDING_FIELDS, DEFAULT_FINDING_FIELDS_FIXTURE } from '@/test-utils/findingFieldsFixtures'
 import type { Finding, FindingFields, FindingListItem, Operation, OperationDetail } from '@/types'
 import OperationDetailPage from './OperationDetailPage'
@@ -42,11 +43,6 @@ function renderPage(route = '/operations/op-1', onOperationChanged?: () => void)
       </MemoryRouter>
     </FluentProvider>,
   )
-}
-
-async function pick(user: UserEvent, label: string, optionName: string): Promise<void> {
-  await user.click(screen.getByRole('combobox', { name: label }))
-  await user.click(within(await screen.findByRole('listbox')).getByRole('option', { name: optionName, exact: true }))
 }
 
 beforeEach(() => {
@@ -468,9 +464,7 @@ it('resends the kept retired values and lists the removed ones, and sends none f
   renderPage()
   await user.click(await screen.findByRole('button', { name: `Edit finding: ${FINDING.title}` }))
   await user.click(screen.getByRole('button', { name: 'Remove retired value contoso_ticket' }))
-  const confirmation = (await screen.findAllByRole('dialog'))
-    .find(dialog => within(dialog).queryByRole('button', { name: 'Keep it' })) as HTMLElement
-  await user.click(within(confirmation).getByRole('button', { name: 'Remove' }))
+  await user.click(within(await findRemovalConfirmation()).getByRole('button', { name: 'Remove' }))
   await user.click(await screen.findByRole('button', { name: 'Save finding' }))
   await waitFor(() => expect(operationsApi.updateFinding).toHaveBeenCalledWith('op-1', FINDING.id, {
     title: FINDING.title, severity: 'informational', field_values: { harm_type: 'Malware', retired_owner: 'Contoso' },

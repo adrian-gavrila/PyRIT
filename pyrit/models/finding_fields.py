@@ -117,9 +117,6 @@ class FindingField(BaseModel):
         """
         Require a key of lowercase letters, digits and underscores.
 
-        Args:
-            key (str): The field or level key.
-
         Raises:
             ValueError: If the key uses any other character or is empty.
         """
@@ -242,7 +239,8 @@ class FindingFields(BaseModel):
     @property
     def field_keys(self) -> frozenset[str]:
         """The key of every field and level, except ``severity``."""
-        return frozenset(key for field in [self.severity, *self.fields] for key in _keys_of(field)) - {"severity"}
+        keys = (key for field in [self.severity, *self.fields] for key, _ in _keys_and_labels(field))
+        return frozenset(keys) - {"severity"}
 
     @field_validator("severity")
     @classmethod
@@ -282,7 +280,7 @@ class FindingFields(BaseModel):
         colored = next((field.key for field in self.fields if field.colors), None)
         if colored is not None:
             raise ValueError(f"Only the severity field can set colors, not '{colored}'.")
-        keys = [key for field in [self.severity, *self.fields] for key in _keys_of(field)]
+        keys = [key for field in [self.severity, *self.fields] for key, _ in _keys_and_labels(field)]
         repeated = _first_repeated(keys)
         if repeated is not None:
             raise ValueError(f"The key '{repeated}' is used more than once across fields and levels.")
@@ -353,10 +351,6 @@ class FindingFields(BaseModel):
         """
         Reject a key that no field or level uses, unless its value has not changed.
 
-        Args:
-            field_values (dict[str, str]): The values to check, by key.
-            previous_values (dict[str, str]): The stored finding's field values.
-
         Raises:
             FindingValuesError: If a key is unknown and its value differs from the stored one.
         """
@@ -378,9 +372,6 @@ def _parse_options(value: Any) -> Any:
     A dict maps each ``(key, label)`` pair to its children, written the same way. In a list, a
     ``(key, label)`` pair becomes an option without children, and anything else passes through.
 
-    Args:
-        value (Any): The options as written.
-
     Returns:
         Any: The options as a list, or ``value`` unchanged if it is neither a dict nor a list.
     """
@@ -394,10 +385,6 @@ def _parse_options(value: Any) -> Any:
 def _parse_branch(*, pair: Any, children: Any) -> dict[str, Any]:
     """
     Turn one cascade dict entry into an option dict with its children.
-
-    Args:
-        pair (Any): The entry's key, which must be a ``(key, label)`` pair.
-        children (Any): The options under it, as a list or a dict.
 
     Returns:
         dict[str, Any]: The option with its parsed children.
@@ -414,9 +401,6 @@ def _is_pair(value: Any) -> bool:
     """
     Check whether a value is a 2-item tuple or list of strings.
 
-    Args:
-        value (Any): The value to check.
-
     Returns:
         bool: True if the value is a ``(key, label)`` pair.
     """
@@ -426,9 +410,6 @@ def _is_pair(value: Any) -> bool:
 def _walk(options: list[FindingFieldOption]) -> Iterator[FindingFieldOption]:
     """
     Yield every option in a tree, each parent before its children.
-
-    Args:
-        options (list[FindingFieldOption]): The top-level options.
 
     Yields:
         FindingFieldOption: Each option in the tree.
@@ -442,9 +423,6 @@ def _depth(options: list[FindingFieldOption]) -> int:
     """
     Count the dropdowns that the deepest branch of an option tree needs.
 
-    Args:
-        options (list[FindingFieldOption]): The top-level options.
-
     Returns:
         int: The depth of the tree, or 0 for no options.
     """
@@ -457,9 +435,6 @@ def _first_repeated(keys: Iterable[str]) -> str | None:
     """
     Find the first key that appears a second time.
 
-    Args:
-        keys (Iterable[str]): The keys in written order.
-
     Returns:
         str | None: The first repeated key, or None if all keys are unique.
     """
@@ -471,27 +446,37 @@ def _first_repeated(keys: Iterable[str]) -> str | None:
     return None
 
 
-def _keys_of(field: FindingField) -> list[str]:
+def _keys_and_labels(field: FindingField) -> list[tuple[str, str]]:
     """
-    List a field's key followed by its level keys.
-
-    Args:
-        field (FindingField): The field.
+    List the ``(key, label)`` of a field followed by those of its levels.
 
     Returns:
-        list[str]: The field key and level keys in written order.
+        list[tuple[str, str]]: The field's and its levels' keys and labels in written order.
     """
-    return [field.key, *(level_key for level_key, _ in field.levels)]
+    return [(field.key, field.label), *field.levels]
+
+
+def _walk_values(
+    *, field: FindingField, values: dict[str, str]
+) -> Iterator[tuple[str, str, str | None, list[FindingFieldOption], FindingFieldOption | None]]:
+    """
+    Walk a field and its levels, following each value to the options of the next level.
+
+    Yields:
+        tuple[str, str, str | None, list[FindingFieldOption], FindingFieldOption | None]: The key, label,
+            non-blank value or None, offered options, and matching option or None of the field and of each level.
+    """
+    options = field.options
+    for key, label in _keys_and_labels(field):
+        value = _non_blank(values.get(key))
+        match = _find_option(options=options, value=value)
+        yield key, label, value, options, match
+        options = match.children if match is not None else []
 
 
 def _check_field_values(*, field: FindingField, values: dict[str, str], previous_values: dict[str, str]) -> None:
     """
     Check the value of one field and of its levels.
-
-    Args:
-        field (FindingField): The field.
-        values (dict[str, str]): Every value of the finding, by key.
-        previous_values (dict[str, str]): Every value of the stored finding, by key.
 
     Raises:
         FindingValuesError: If a required value is missing or a value is not an option.
@@ -508,80 +493,23 @@ def _check_choice_values(*, field: FindingField, values: dict[str, str], previou
 
     A value that is not an option passes if it and every value above it are unchanged.
 
-    Args:
-        field (FindingField): The choice field.
-        values (dict[str, str]): Every value of the finding, by key.
-        previous_values (dict[str, str]): Every value of the stored finding, by key.
-
     Raises:
         FindingValuesError: If a required dropdown with options has no value, or a changed value is
             not an option and is not allowed as Other text.
     """
-    options = field.options
     path_unchanged = True
-    for key, label in [(field.key, field.label), *field.levels]:
-        value = _non_blank(values.get(key))
+    for key, label, value, options, match in _walk_values(field=field, values=values):
         path_unchanged = path_unchanged and value == _non_blank(previous_values.get(key))
-        options = _check_level(
-            label=label,
-            value=value,
-            options=options,
-            required=field.required,
-            unchanged=path_unchanged,
-            allow_other=field.allow_other,
-        )
-
-
-def _check_level(
-    *,
-    label: str,
-    value: str | None,
-    options: list[FindingFieldOption],
-    required: bool,
-    unchanged: bool,
-    allow_other: bool,
-) -> list[FindingFieldOption]:
-    """
-    Check one dropdown's value and find the options of the next dropdown.
-
-    Args:
-        label (str): The dropdown's label.
-        value (str | None): The dropdown's value, or None if it is missing.
-        options (list[FindingFieldOption]): The options the dropdown offers.
-        required (bool): Whether the field is required.
-        unchanged (bool): Whether this value and every value above it are unchanged, so a value
-            that is not an option passes.
-        allow_other (bool): Whether the field accepts Other text.
-
-    Returns:
-        list[FindingFieldOption]: The children of the chosen option, or an empty list if there is
-            no matching option.
-
-    Raises:
-        FindingValuesError: If a required dropdown with options has no value, or a changed value is
-            not an option and is not allowed as Other text.
-    """
-    if value is None:
-        if required and options:
-            raise FindingValuesError(f"{label} is required.")
-        return []
-    match = _find_option(options=options, value=value)
-    if match is not None:
-        return match.children
-    if not unchanged:
-        _check_other_text(label=label, value=value, options=options, allow_other=allow_other)
-    return []
+        if value is None:
+            if field.required and options:
+                raise FindingValuesError(f"{label} is required.")
+        elif match is None and not path_unchanged:
+            _check_other_text(label=label, value=value, options=options, allow_other=field.allow_other)
 
 
 def _check_other_text(*, label: str, value: str, options: list[FindingFieldOption], allow_other: bool) -> None:
     """
     Accept a value that is not an option only as Other text that names no option.
-
-    Args:
-        label (str): The dropdown's label.
-        value (str): The dropdown's value.
-        options (list[FindingFieldOption]): The options the dropdown offers.
-        allow_other (bool): Whether the field accepts Other text.
 
     Raises:
         FindingValuesError: If the field takes no Other text, or the text matches an option's key or
@@ -615,10 +543,6 @@ def _find_option(*, options: list[FindingFieldOption], value: str | None) -> Fin
     """
     Find the option whose key is a dropdown's value.
 
-    Args:
-        options (list[FindingFieldOption]): The options the dropdown offers.
-        value (str | None): The dropdown's value, or None if it is missing.
-
     Returns:
         FindingFieldOption | None: The matching option, or None if no option has that key.
     """
@@ -629,18 +553,10 @@ def _value_rows(*, field: FindingField, values: dict[str, str]) -> Iterator[Find
     """
     Label the filled values of one field and of its levels.
 
-    Args:
-        field (FindingField): The field.
-        values (dict[str, str]): Every value of the finding, by key.
-
     Yields:
         FindingValueRow: A row for each filled value, in level order.
     """
-    options = field.options
-    for key, label in [(field.key, field.label), *field.levels]:
-        value = _non_blank(values.get(key))
-        match = _find_option(options=options, value=value)
-        options = match.children if match is not None else []
+    for key, label, value, _, match in _walk_values(field=field, values=values):
         if value is not None:
             yield FindingValueRow(
                 key=key,
@@ -657,11 +573,11 @@ DEFAULT_FINDING_FIELDS = FindingFields(
         label="Severity",
         type=FindingFieldType.CHOICE,
         options=[
-            FindingFieldOption(key="critical", label="Critical"),
-            FindingFieldOption(key="important", label="Important"),
-            FindingFieldOption(key="moderate", label="Moderate"),
-            FindingFieldOption(key="low", label="Low"),
-            FindingFieldOption(key="informational", label="Informational"),
+            ("critical", "Critical"),
+            ("important", "Important"),
+            ("moderate", "Moderate"),
+            ("low", "Low"),
+            ("informational", "Informational"),
         ],
         default="moderate",
         allow_other=True,
@@ -678,9 +594,7 @@ DEFAULT_FINDING_FIELDS = FindingFields(
             label="Harm-type",
             type=FindingFieldType.CHOICE,
             options=[
-                FindingFieldOption(key=category.value, label=category.value)
-                for category in HarmCategory
-                if category is not HarmCategory.OTHER
+                (category.value, category.value) for category in HarmCategory if category is not HarmCategory.OTHER
             ],
             allow_other=True,
             hint="Optional. Select a category, or choose Other for custom text.",

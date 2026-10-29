@@ -18,7 +18,6 @@ interface FindingCountsProps {
   counts: Record<string, number>
 }
 
-/** One badge per counted severity option, then one Other badge whose tooltip lists the unmatched severities. */
 function FindingCounts({ fields, counts }: FindingCountsProps) {
   const styles = useOperationsStyles()
   const badges = severityCountBadges(fields, counts)

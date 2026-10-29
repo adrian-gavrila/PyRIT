@@ -3,8 +3,9 @@ import { render, screen } from '@testing-library/react'
 import userEvent, { type UserEvent } from '@testing-library/user-event'
 import { FluentProvider, webLightTheme } from '@fluentui/react-components'
 
-import { CONTOSO_FINDING_FIELDS } from '@/test-utils/findingFieldsFixtures'
-import type { FindingField, FindingFieldOption } from '@/types'
+import { pick } from '@/test-utils/findingDialog'
+import { CONTOSO_FINDING_FIELDS, contosoField, option } from '@/test-utils/findingFieldsFixtures'
+import type { FindingField } from '@/types'
 
 import FindingFieldInput from './FindingFieldInput'
 
@@ -13,16 +14,6 @@ const TestWrapper: React.FC<{ children: React.ReactNode }> = ({ children }) => (
 )
 
 const UNMATCHED_HINT = 'Not a current option. It stays unless you change it.'
-
-function contosoField(key: string): FindingField {
-  const field = CONTOSO_FINDING_FIELDS.fields.find((candidate: FindingField) => candidate.key === key)
-  if (field === undefined) throw new Error(`CONTOSO_FINDING_FIELDS has no field ${key}`)
-  return field
-}
-
-function option(key: string, label: string, children: FindingFieldOption[] = []): FindingFieldOption {
-  return { key, label, children }
-}
 
 const CATEGORY = contosoField('category')
 const TECHNIQUE = contosoField('technique')
@@ -64,7 +55,7 @@ interface FieldHarnessProps {
   onOtherBlankChange?: (blank: boolean) => void
 }
 
-// Holds the draft the way the finding dialog will, so a test can follow several changes.
+// Holds the draft as the finding dialog does, so a test can follow several changes.
 function FieldHarness({ field, initialValues, onChange, onOtherBlankChange }: FieldHarnessProps) {
   const [values, setValues] = useState(initialValues)
   return (
@@ -79,11 +70,6 @@ function FieldHarness({ field, initialValues, onChange, onOtherBlankChange }: Fi
 async function openPicker(user: UserEvent, label: string): Promise<void> {
   await user.click(screen.getByRole('combobox', { name: label }))
   await screen.findByRole('listbox')
-}
-
-async function pick(user: UserEvent, label: string, optionName: string): Promise<void> {
-  await openPicker(user, label)
-  await user.click(screen.getByRole('option', { name: optionName }))
 }
 
 function optionNames(): string[] {

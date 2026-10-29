@@ -8,14 +8,12 @@ import {
 import { toApiError } from '@/services/errors'
 import type { FindingCreate, FindingField, FindingFields } from '@/types'
 import { generateClientId } from '@/utils/clientId'
-import { fieldKeys, firstMissingRequired } from '@/utils/findingFields'
+import { firstMissingRequired, type RetiredValue, SEVERITY_KEY, splitRetiredValues } from '@/utils/findingFields'
 
 import { useFindingDialogStyles } from './FindingDialog.styles'
 import FindingFieldInput from './FindingFieldInput'
 import RetiredFieldValues from './RetiredFieldValues'
 
-// FindingFieldInput reads and reports the severity slot's own value under this key.
-const SEVERITY_KEY = 'severity'
 const NO_KEYS: ReadonlySet<string> = new Set()
 
 /** One save attempt. The id repeats while the input does, so a retry returns a finding a lost response saved. */
@@ -26,7 +24,7 @@ export interface FindingSaveAttempt {
 
 /** The finding Save sends. An edit also resends its kept retired values unchanged, and lists the keys to delete. */
 export interface FindingDraft extends FindingCreate {
-  removeRetiredKeys?: string[]
+  remove_retired_keys?: string[]
 }
 
 interface FindingDialogProps {
@@ -42,11 +40,6 @@ interface FindingDialogProps {
   onClose: () => void
 }
 
-interface RetiredValue {
-  key: string
-  value: string
-}
-
 /** A new finding starts from the field defaults. An edit starts from its values, with retired ones set apart. */
 function openingState(
   fields: FindingFields, initialValues: FindingCreate | undefined,
@@ -58,13 +51,7 @@ function openingState(
     }
     return { draft: { title: '', severity: fields.severity.default ?? '', field_values: defaults }, retired: [] }
   }
-  const known = fieldKeys(fields)
-  const current: Record<string, string> = {}
-  const retired: RetiredValue[] = []
-  for (const [key, value] of Object.entries(initialValues.field_values)) {
-    if (known.has(key)) current[key] = value
-    else retired.push({ key, value })
-  }
+  const { current, retired } = splitRetiredValues(fields, initialValues.field_values)
   return { draft: { title: initialValues.title, severity: initialValues.severity, field_values: current }, retired }
 }
 
@@ -142,7 +129,7 @@ export default function FindingDialog({
       ? {
         ...filled,
         field_values: { ...keptValues(opening.retired, removed), ...filled.field_values },
-        removeRetiredKeys: [...removed],
+        remove_retired_keys: [...removed],
       }
       : filled
     const signature = JSON.stringify([finding, trimmedAttackResultId])

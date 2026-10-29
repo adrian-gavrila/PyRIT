@@ -5,6 +5,7 @@ import { FluentProvider, webLightTheme } from '@fluentui/react-components'
 import { MemoryRouter } from 'react-router'
 
 import { attacksApi, operationsApi } from '@/services/api'
+import { pick } from '@/test-utils/findingDialog'
 import { DEFAULT_FINDING_FIELDS_FIXTURE } from '@/test-utils/findingFieldsFixtures'
 import type { FindingListItem } from '@/types'
 import FindingEvidenceDialog from './FindingEvidenceDialog'
@@ -193,11 +194,6 @@ async function openCreation(user: ReturnType<typeof userEvent.setup>): Promise<v
   await screen.findByRole('heading', { name: 'New finding' })
 }
 
-async function pick(user: ReturnType<typeof userEvent.setup>, label: string, optionName: string): Promise<void> {
-  await user.click(screen.getByRole('combobox', { name: label }))
-  await user.click(within(await screen.findByRole('listbox')).getByRole('option', { name: optionName, exact: true }))
-}
-
 it('creates the finding with the viewed attack as evidence in one request and closes both dialogs', async () => {
   const user = userEvent.setup()
   renderDialog()
@@ -221,7 +217,7 @@ it('creates the finding with the viewed attack as evidence in one request and cl
   await waitFor(() => { expect(screen.getByRole('button', { name: 'Link to finding' })).toHaveFocus() })
 })
 
-it('creates and attaches custom classifications from the same shared form and shows them in the picker', async () => {
+it('shows a custom severity but not the harm type in the picker, and creates and attaches custom classifications', async () => {
   const user = userEvent.setup()
   jest.mocked(operationsApi.listFindings).mockResolvedValue({ ...EMPTY, items: [{
     ...FINDING, severity: 'Team severity', field_values: { harm_type: 'Team harm' },

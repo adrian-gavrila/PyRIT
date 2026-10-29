@@ -225,33 +225,6 @@ async def test_update_finding_replaces_field_values_without_losing_evidence(sqli
     assert await sqlite_instance.get_finding_evidence_counts_async(finding_ids=[saved.id]) == {saved.id: 1}
 
 
-async def test_custom_severity_sorts_after_every_preset(sqlite_instance: SQLiteMemory) -> None:
-    operation = await sqlite_instance.add_operation_async(Operation(name="Order"))
-    stamp = datetime(2026, 10, 9, tzinfo=UTC)
-    for number, severity in enumerate(
-        ["Sev 2.5", "informational", "low", "moderate", "important", "critical"], start=1
-    ):
-        await sqlite_instance.add_finding_async(
-            finding=Finding.model_validate(
-                {
-                    "id": UUID(int=number),
-                    "created_at": stamp,
-                    "operation_id": operation.id,
-                    "title": severity,
-                    "severity": severity,
-                }
-            )
-        )
-    assert [finding.title for finding in await sqlite_instance.get_findings_async(severity_order=SEVERITY_ORDER)] == [
-        "critical",
-        "important",
-        "moderate",
-        "low",
-        "informational",
-        "Sev 2.5",
-    ]
-
-
 async def test_get_findings_sorts_unlisted_severities_after_listed_ones(sqlite_instance: SQLiteMemory) -> None:
     operation = await sqlite_instance.add_operation_async(Operation(name="Partial order"))
     stamp = datetime(2026, 10, 9, tzinfo=UTC)

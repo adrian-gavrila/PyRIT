@@ -22,10 +22,6 @@ from pyrit.setup.initialization import reinitialize_pyrit_async
 from pyrit.setup.initializers import FindingsInitializer
 from pyrit.setup.pyrit_initializer import PyRITInitializer
 
-CUSTOM = FindingFields(
-    severity=FindingField(key="severity", label="Severity", type="choice", options=[("high", "High")])
-)
-
 
 @pytest.mark.parametrize("existing_memory", [False, True])
 async def test_initializer_failure_closes_only_newly_installed_memory(
@@ -450,27 +446,26 @@ class TestInitializePyritSilent:
         assert CentralMemory.get_memory_instance()._silent is silent
 
 
-class _SetsCustomFields(PyRITInitializer):
-    async def initialize_async(self) -> None:
-        set_active_finding_fields(finding_fields=CUSTOM, source="pass")
-
-
 @pytest.mark.usefixtures("reset_memory_singletons", "reset_finding_fields")
-async def test_each_setup_pass_resets_finding_fields() -> None:
-    with mock.patch("pyrit.setup.initialization.load_environment_async", new_callable=mock.AsyncMock):
-        await initialize_pyrit_async(memory_db_type=IN_MEMORY, initializers=[_SetsCustomFields()])
-        assert get_active_finding_fields() is CUSTOM
+async def test_each_setup_pass_resets_finding_fields(custom_finding_fields: FindingFields) -> None:
+    class SetsCustomFields(PyRITInitializer):
+        async def initialize_async(self) -> None:
+            set_active_finding_fields(finding_fields=custom_finding_fields, source="pass")
 
-        await initialize_pyrit_async(memory_db_type=IN_MEMORY, initializers=[_SetsCustomFields()])
-        assert get_active_finding_fields() is CUSTOM
+    with mock.patch("pyrit.setup.initialization.load_environment_async", new_callable=mock.AsyncMock):
+        await initialize_pyrit_async(memory_db_type=IN_MEMORY, initializers=[SetsCustomFields()])
+        assert get_active_finding_fields() is custom_finding_fields
+
+        await initialize_pyrit_async(memory_db_type=IN_MEMORY, initializers=[SetsCustomFields()])
+        assert get_active_finding_fields() is custom_finding_fields
 
         await initialize_pyrit_async(memory_db_type=IN_MEMORY, load_defaults=False)
         assert get_active_finding_fields() is DEFAULT_FINDING_FIELDS
 
 
 @pytest.mark.usefixtures("reset_finding_fields")
-async def test_reinitialize_resets_finding_fields() -> None:
-    set_active_finding_fields(finding_fields=CUSTOM, source="pass")
+async def test_reinitialize_resets_finding_fields(custom_finding_fields: FindingFields) -> None:
+    set_active_finding_fields(finding_fields=custom_finding_fields, source="pass")
     with (
         mock.patch.object(CentralMemory, "set_memory_instance"),
         mock.patch.object(initialization, "_execute_initializers_async", new_callable=mock.AsyncMock),
@@ -482,14 +477,14 @@ async def test_reinitialize_resets_finding_fields() -> None:
 
 
 @pytest.mark.usefixtures("reset_memory_singletons", "reset_finding_fields")
-async def test_second_findings_initializer_stops_setup() -> None:
+async def test_second_findings_initializer_stops_setup(custom_finding_fields: FindingFields) -> None:
     class FirstFindingFields(FindingsInitializer):
         def get_finding_fields(self) -> FindingFields:
-            return CUSTOM
+            return custom_finding_fields
 
     class SecondFindingFields(FindingsInitializer):
         def get_finding_fields(self) -> FindingFields:
-            return CUSTOM
+            return custom_finding_fields
 
     with mock.patch("pyrit.setup.initialization.load_environment_async", new_callable=mock.AsyncMock):
         with pytest.raises(
@@ -501,11 +496,11 @@ async def test_second_findings_initializer_stops_setup() -> None:
 
 
 @pytest.mark.usefixtures("reset_memory_singletons", "reset_finding_fields")
-async def test_invalid_finding_fields_stop_setup() -> None:
+async def test_invalid_finding_fields_stop_setup(custom_finding_fields: FindingFields) -> None:
     class BrokenFindingFields(FindingsInitializer):
         def get_finding_fields(self) -> FindingFields:
             return FindingFields(
-                severity=CUSTOM.severity,
+                severity=custom_finding_fields.severity,
                 fields=[FindingField(key="broken", label="Broken", type="choice", options=[])],
             )
 

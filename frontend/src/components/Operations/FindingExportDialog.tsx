@@ -11,7 +11,7 @@ import { toApiError } from '@/services/errors'
 import type { FindingExportFormat, FindingFields, FindingListItem, Operation } from '@/types'
 import { downloadFile } from '@/utils/downloadFile'
 import { findingExportFilename } from '@/utils/findingExportFilename'
-import { fieldKeys } from '@/utils/findingFields'
+import { splitRetiredValues } from '@/utils/findingFields'
 
 import { useFindingExportDialogStyles } from './FindingExportDialog.styles'
 import FindingSeverityBadge from './FindingSeverityBadge'
@@ -74,9 +74,8 @@ export default function FindingExportDialog({ operation, fields }: FindingExport
   const selectedIds = findings.filter(finding => selected.has(finding.id)).map(finding => finding.id)
   const allSelected = selectedIds.length === findings.length
   const selectAllChecked = allSelected ? true : selectedIds.length === 0 ? false : 'mixed'
-  const knownKeys = fieldKeys(fields)
   const selectedWithRetired = findings.filter(finding => selected.has(finding.id)
-    && Object.keys(finding.field_values).some(key => !knownKeys.has(key))).length
+    && splitRetiredValues(fields, finding.field_values).retired.length > 0).length
   // A natively disabled button drops keyboard focus out of the dialog, so while an export runs, and while the list
   // reloads or shows nothing selected after a deleted finding, Download stays focusable but unavailable.
   const downloadKeepsFocus = exporting || (selectedIds.length === 0 && (recovering || removedTitles.length > 0))

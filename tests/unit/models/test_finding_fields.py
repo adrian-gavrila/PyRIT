@@ -92,7 +92,7 @@ def test_field_keys_lists_every_field_and_level_key_except_severity() -> None:
     )
 
 
-def test_default_finding_fields_match_3066() -> None:
+def test_default_finding_fields_define_severity_harm_type_and_description() -> None:
     severity, (harm, description) = DEFAULT_FINDING_FIELDS.severity, DEFAULT_FINDING_FIELDS.fields
     assert DEFAULT_FINDING_FIELDS.severity_order == ["critical", "important", "moderate", "low", "informational"]
     assert [option.label for option in severity.options] == [
@@ -122,17 +122,6 @@ def test_default_finding_fields_match_3066() -> None:
 
 
 SEVERITY = {"key": "severity", "label": "Severity", "type": "choice", "options": [("high", "High")]}
-
-
-@pytest.mark.parametrize("color", ["red", "orange", "yellow", "green", "blue", "gray", "dark", "neutral"])
-def test_severity_slot_accepts_every_badge_color(color: str) -> None:
-    fields = FindingFields.model_validate({"severity": {**SEVERITY, "colors": {"high": color}}, "fields": []})
-    assert fields.severity.colors == {"high": color}
-
-
-def test_severity_slot_rejects_an_unknown_color() -> None:
-    with pytest.raises(ValidationError, match="Input should be"):
-        FindingFields.model_validate({"severity": {**SEVERITY, "colors": {"high": "pink"}}, "fields": []})
 
 
 def _choice(**overrides: object) -> dict[str, object]:

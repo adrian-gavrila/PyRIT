@@ -9,7 +9,6 @@ interface FindingSeverityBadgeProps {
   severity: string
 }
 
-/** The severity's option label and color, or its stored text on a neutral badge when it matches no option. */
 export default function FindingSeverityBadge({ fields, severity }: FindingSeverityBadgeProps) {
   const styles = useFindingSeverityBadgeStyles()
   const { label, color } = severityBadge(fields, severity)

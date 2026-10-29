@@ -23,7 +23,7 @@ interface RetiredFieldValuesHarnessProps {
   onUndo: () => void
 }
 
-// Holds the removed keys the way the edit dialog will, so a test can follow a removal through to Undo.
+// Holds the removed keys as the edit dialog does, so a test can follow a removal through to Undo.
 function RetiredFieldValuesHarness({ onRemove, onUndo }: RetiredFieldValuesHarnessProps) {
   const [removed, setRemoved] = useState<ReadonlySet<string>>(new Set())
   return (

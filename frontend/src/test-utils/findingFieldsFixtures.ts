@@ -18,7 +18,7 @@ function field(definition: FieldDefinition): FindingField {
   }
 }
 
-function option(key: string, label: string, children: FindingFieldOption[] = []): FindingFieldOption {
+export function option(key: string, label: string, children: FindingFieldOption[] = []): FindingFieldOption {
   return { key, label, children }
 }
 
@@ -73,6 +73,12 @@ export const CONTOSO_FINDING_FIELDS: FindingFields = {
     }),
     field({ key: 'owner', label: 'Owner', type: 'text', section: 'Tracking', internal: true }),
   ],
+}
+
+export function contosoField(key: string): FindingField {
+  const match = CONTOSO_FINDING_FIELDS.fields.find((candidate: FindingField) => candidate.key === key)
+  if (match === undefined) throw new Error(`CONTOSO_FINDING_FIELDS has no field ${key}`)
+  return match
 }
 
 /** A copy of the backend's `DEFAULT_FINDING_FIELDS`, with three harm types instead of the whole taxonomy. */

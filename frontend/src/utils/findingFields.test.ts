@@ -1,5 +1,5 @@
-import { CONTOSO_FINDING_FIELDS, DEFAULT_FINDING_FIELDS_FIXTURE } from '@/test-utils/findingFieldsFixtures'
-import type { FindingField, FindingFieldOption, FindingFields } from '@/types'
+import { CONTOSO_FINDING_FIELDS, contosoField, DEFAULT_FINDING_FIELDS_FIXTURE } from '@/test-utils/findingFieldsFixtures'
+import type { FindingFieldOption, FindingFields } from '@/types'
 
 import {
   choiceLevels,
@@ -12,12 +12,6 @@ import {
   severityBadge,
   severityCountBadges,
 } from './findingFields'
-
-function contosoField(key: string): FindingField {
-  const match = CONTOSO_FINDING_FIELDS.fields.find((field: FindingField) => field.key === key)
-  if (match === undefined) throw new Error(`The Contoso fixture has no field ${key}`)
-  return match
-}
 
 function optionKeys(options: FindingFieldOption[]): string[] {
   return options.map((option: FindingFieldOption) => option.key)
@@ -38,7 +32,7 @@ describe('findingFields', () => {
       blue: 'brand', gray: 'informative', dark: 'important', neutral: 'subtle' })
   })
 
-  it('keeps the #3066 badge colors for the default fields', () => {
+  it('gives the default severities their badge colors', () => {
     expect(['critical', 'important', 'moderate', 'low', 'informational']
       .map((key: string) => severityBadge(DEFAULT_FINDING_FIELDS_FIXTURE, key).color))
       .toEqual(['danger', 'warning', 'warning', 'informative', 'subtle'])

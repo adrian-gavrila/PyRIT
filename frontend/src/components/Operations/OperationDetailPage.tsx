@@ -102,11 +102,12 @@ function OperationDetailContent({ operationId, onOperationChanged }: { operation
   }
 
   const save = async (draft: FindingDraft, attempt: FindingSaveAttempt): Promise<void> => {
-    const { removeRetiredKeys = [], ...finding } = draft
     const saved = editing
-      ? await operationsApi.updateFinding(operationId, editing.id, { ...finding, remove_retired_keys: removeRetiredKeys })
+      ? await operationsApi.updateFinding(operationId, editing.id, {
+        ...draft, remove_retired_keys: draft.remove_retired_keys ?? [],
+      })
       : await operationsApi.createFinding(operationId, {
-        ...finding, id: attempt.id, ...(attempt.attackResultId ? { attack_result_id: attempt.attackResultId } : {}),
+        ...draft, id: attempt.id, ...(attempt.attackResultId ? { attack_result_id: attempt.attackResultId } : {}),
       })
     setNotice(`Finding ${editing ? 'updated' : 'saved'}: ${saved.title}`)
     setOpen(false)

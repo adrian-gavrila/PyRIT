@@ -11,10 +11,7 @@ interface FindingCardValuesProps {
   finding: Pick<FindingListItem, 'severity' | 'field_values'>
 }
 
-/**
- * A finding card's filled values in configured order: a single-line value as one `Label: value` line, and a
- * multi-line value under its label. Values of fields that are no longer configured follow under their raw keys.
- */
+/** A finding card's filled values, then the values of fields that are no longer configured under their raw keys. */
 export default function FindingCardValues({ fields, finding }: FindingCardValuesProps) {
   const styles = useOperationsStyles()
   const retiredHeadingId = useId()
