@@ -121,19 +121,19 @@ async def test_preflight_uses_isolated_registry_without_changing_live_state() ->
 
 
 @pytest.mark.usefixtures("reset_finding_fields")
-async def test_preflight_rejects_two_finding_fields_initializers(tmp_path: Path) -> None:
+async def test_preflight_rejects_two_findings_initializers(tmp_path: Path) -> None:
     script = tmp_path / "two_finding_fields.py"
     script.write_text(
         """
 from pyrit.models import FindingField, FindingFields
-from pyrit.setup.initializers import FindingFieldsInitializer
+from pyrit.setup.initializers import FindingsInitializer
 
 SEVERITY = FindingField(key="severity", label="Severity", type="choice", options=[("sev1", "Sev 1")])
 
-class ContosoFindingFields(FindingFieldsInitializer):
+class ContosoFindingFields(FindingsInitializer):
     def get_finding_fields(self): return FindingFields(severity=SEVERITY)
 
-class ContosoBackupFields(FindingFieldsInitializer):
+class ContosoBackupFields(FindingsInitializer):
     def get_finding_fields(self): return FindingFields(severity=SEVERITY)
 """,
         encoding="utf-8",
@@ -143,7 +143,7 @@ class ContosoBackupFields(FindingFieldsInitializer):
 
     message = (
         "ContosoBackupFields and ContosoFindingFields both set the finding fields. "
-        "Use one FindingFieldsInitializer per deployment."
+        "Use one FindingsInitializer per deployment."
     )
     with pytest.raises(ValueError, match=re.escape(message)):
         await config.preflight_reinitialization_async(environment_values={})
@@ -156,9 +156,9 @@ async def test_preflight_rejects_invalid_finding_fields(tmp_path: Path) -> None:
     script.write_text(
         """
 from pyrit.models import FindingField, FindingFields
-from pyrit.setup.initializers import FindingFieldsInitializer
+from pyrit.setup.initializers import FindingsInitializer
 
-class ContosoFindingFields(FindingFieldsInitializer):
+class ContosoFindingFields(FindingsInitializer):
     def get_finding_fields(self):
         return FindingFields(severity=FindingField(key="severity", label="Severity", type="choice", options=[]))
 """,
@@ -177,9 +177,9 @@ async def test_preflight_rejects_finding_fields_of_the_wrong_type(tmp_path: Path
     script = tmp_path / "wrong_type_finding_fields.py"
     script.write_text(
         """
-from pyrit.setup.initializers import FindingFieldsInitializer
+from pyrit.setup.initializers import FindingsInitializer
 
-class ContosoFindingFields(FindingFieldsInitializer):
+class ContosoFindingFields(FindingsInitializer):
     def get_finding_fields(self):
         return {}
 """,

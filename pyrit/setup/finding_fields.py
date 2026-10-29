@@ -36,7 +36,7 @@ def set_active_finding_fields(*, finding_fields: FindingFields, source: str) -> 
     if _active is not None:
         raise ValueError(
             f"{source} cannot set the finding fields: {_active[1]} already set them in this setup pass. "
-            "Use one FindingFieldsInitializer per deployment."
+            "Use one FindingsInitializer per deployment."
         )
     _active = (finding_fields, source)
 

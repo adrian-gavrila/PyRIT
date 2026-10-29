@@ -10,7 +10,7 @@ from pyrit.models import (
     FindingFields,
     FindingValuesError,
 )
-from pyrit.models.finding_fields import FindingFieldOption
+from pyrit.models.finding_fields import FindingFieldOption, FindingValueRow
 from pyrit.models.harm_category import HarmCategory
 
 CONTOSO = FindingFields(
@@ -59,7 +59,7 @@ CONTOSO = FindingFields(
             section="Reproduction",
             hint="List the prompts in the order you sent them.",
         ),
-        FindingField(key="owner", label="Owner", type="text", section="Tracking"),
+        FindingField(key="owner", label="Owner", type="text", section="Tracking", internal=True),
     ],
 )
 
@@ -194,6 +194,75 @@ def test_finding_field_rejects_invalid_parts(field: dict, match: str) -> None:
 
 def test_severity_slot_accepts_explicit_required() -> None:
     assert FindingFields.model_validate({"severity": {**SEVERITY, "required": True}}).severity.required is True
+
+
+def test_internal_defaults_to_false_and_is_rejected_on_the_severity_slot() -> None:
+    assert FindingField.model_validate(_choice()).internal is False
+    with pytest.raises(ValidationError, match="The severity slot can't be internal."):
+        FindingFields.model_validate({"severity": {**SEVERITY, "internal": True}})
+
+
+def test_describe_values_lists_filled_values_in_configured_order_and_retired_keys() -> None:
+    description = CONTOSO.describe_values(
+        severity="sev1",
+        field_values={
+            "owner": "dana",
+            "description": "Old text",
+            "category": "model_security",
+            "subcategory": "system_prompt_leak",
+            "technique": "Many-shot priming",
+            "steps": "   ",
+            "severity_rationale": "remote_no_auth",
+            "repro": "Older text",
+        },
+    )
+    assert description.severity_label == "Sev 1"
+    assert [(row.label, row.value) for row in description.rows] == [
+        ("Severity rationale", "Remote, no sign-in needed"),
+        ("Category", "Model security"),
+        ("Subcategory", "System prompt leak"),
+        ("Technique", "Many-shot priming"),
+        ("Owner", "dana"),
+    ]
+    assert description.retired == [("description", "Old text"), ("repro", "Older text")]
+
+
+def test_describe_values_shows_a_cascade_child_not_under_its_stored_parent_as_typed() -> None:
+    description = CONTOSO.describe_values(
+        severity="sev1", field_values={"category": "model_security", "subcategory": "hate_speech"}
+    )
+    assert [(row.label, row.value) for row in description.rows] == [
+        ("Category", "Model security"),
+        ("Subcategory", "hate_speech"),
+    ]
+
+
+def test_describe_values_shows_an_unmatched_severity_as_typed() -> None:
+    description = CONTOSO.describe_values(severity="Sev 2.5", field_values={"severity_rationale": "remote_no_auth"})
+    assert description.severity_label == "Sev 2.5"
+    assert [(row.label, row.value) for row in description.rows] == [("Severity rationale", "remote_no_auth")]
+
+
+def test_describe_values_carries_multiline_and_internal_on_each_row() -> None:
+    description = CONTOSO.describe_values(severity="sev2", field_values={"owner": "dana", "steps": "1. Open\n2. Ask"})
+    assert description.rows == [
+        FindingValueRow(
+            key="steps", label="Steps to reproduce", value="1. Open\n2. Ask", multiline=True, internal=False
+        ),
+        FindingValueRow(key="owner", label="Owner", value="dana", multiline=False, internal=True),
+    ]
+    assert description.retired == []
+
+
+def test_describe_values_labels_the_default_fields() -> None:
+    description = DEFAULT_FINDING_FIELDS.describe_values(
+        severity="critical", field_values={"description": "Synthetic text", "harm_type": "Hate Speech"}
+    )
+    assert description.severity_label == "Critical"
+    assert description.rows == [
+        FindingValueRow(key="harm_type", label="Harm-type", value="Hate Speech", multiline=False, internal=False),
+        FindingValueRow(key="description", label="Description", value="Synthetic text", multiline=True, internal=False),
+    ]
 
 
 VALID = {

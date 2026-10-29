@@ -19,7 +19,7 @@ from pyrit.registry import InitializerRegistry
 from pyrit.setup import IN_MEMORY, initialization, initialize_pyrit_async
 from pyrit.setup.finding_fields import get_active_finding_fields, set_active_finding_fields
 from pyrit.setup.initialization import reinitialize_pyrit_async
-from pyrit.setup.initializers import FindingFieldsInitializer
+from pyrit.setup.initializers import FindingsInitializer
 from pyrit.setup.pyrit_initializer import PyRITInitializer
 
 CUSTOM = FindingFields(
@@ -482,12 +482,12 @@ async def test_reinitialize_resets_finding_fields() -> None:
 
 
 @pytest.mark.usefixtures("reset_memory_singletons", "reset_finding_fields")
-async def test_second_finding_fields_initializer_stops_setup() -> None:
-    class FirstFindingFields(FindingFieldsInitializer):
+async def test_second_findings_initializer_stops_setup() -> None:
+    class FirstFindingFields(FindingsInitializer):
         def get_finding_fields(self) -> FindingFields:
             return CUSTOM
 
-    class SecondFindingFields(FindingFieldsInitializer):
+    class SecondFindingFields(FindingsInitializer):
         def get_finding_fields(self) -> FindingFields:
             return CUSTOM
 
@@ -502,7 +502,7 @@ async def test_second_finding_fields_initializer_stops_setup() -> None:
 
 @pytest.mark.usefixtures("reset_memory_singletons", "reset_finding_fields")
 async def test_invalid_finding_fields_stop_setup() -> None:
-    class BrokenFindingFields(FindingFieldsInitializer):
+    class BrokenFindingFields(FindingsInitializer):
         def get_finding_fields(self) -> FindingFields:
             return FindingFields(
                 severity=CUSTOM.severity,

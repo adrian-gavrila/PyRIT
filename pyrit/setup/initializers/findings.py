@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-"""Base initializer for a deployment's finding fields."""
+"""Base initializer for a deployment's findings."""
 
 from abc import abstractmethod
 from typing import Any
@@ -11,7 +11,7 @@ from pyrit.setup.finding_fields import set_active_finding_fields
 from pyrit.setup.pyrit_initializer import PyRITInitializer
 
 
-class FindingFieldsInitializer(PyRITInitializer):
+class FindingsInitializer(PyRITInitializer):
     """Set a deployment's finding fields from ``get_finding_fields``."""
 
     @abstractmethod

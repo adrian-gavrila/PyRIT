@@ -11,7 +11,7 @@ from pyrit.models import DEFAULT_FINDING_FIELDS, FindingField, FindingFields
 from pyrit.registry import InitializerRegistry
 from pyrit.registry.discovery import discover_in_directory
 from pyrit.setup.finding_fields import get_active_finding_fields
-from pyrit.setup.initializers import FindingFieldsInitializer
+from pyrit.setup.initializers import FindingsInitializer
 from pyrit.setup.pyrit_initializer import PyRITInitializer
 
 pytestmark = pytest.mark.usefixtures("reset_finding_fields")
@@ -22,10 +22,10 @@ EXAMPLE = FindingFields(
 
 CONTOSO_SCRIPT = '''
 from pyrit.models import FindingField, FindingFields
-from pyrit.setup.initializers import FindingFieldsInitializer
+from pyrit.setup.initializers import FindingsInitializer
 
 
-class ContosoFindingFields(FindingFieldsInitializer):
+class ContosoFindingFields(FindingsInitializer):
     """Contoso finding fields."""
 
     def get_finding_fields(self) -> FindingFields:
@@ -35,14 +35,14 @@ class ContosoFindingFields(FindingFieldsInitializer):
 '''
 
 
-class ExampleFindingFields(FindingFieldsInitializer):
+class ExampleFindingFields(FindingsInitializer):
     """Example finding fields."""
 
     def get_finding_fields(self) -> FindingFields:
         return EXAMPLE
 
 
-async def test_finding_fields_initializer_sets_the_active_fields() -> None:
+async def test_findings_initializer_sets_the_active_fields() -> None:
     await ExampleFindingFields().initialize_async()
     assert get_active_finding_fields() is EXAMPLE
 
@@ -57,22 +57,22 @@ async def test_get_info_leaves_the_active_fields_alone() -> None:
     assert info["global_variables"] == []
 
 
-def test_finding_fields_initializer_is_skipped_by_builtin_discovery() -> None:
+def test_findings_initializer_is_skipped_by_builtin_discovery() -> None:
     directory = Path(pyrit.setup.initializers.__file__).parent
     names = [
         cls.__name__
         for _, _, cls in discover_in_directory(directory=directory, base_class=PyRITInitializer, recursive=True)
     ]
-    assert "FindingFieldsInitializer" not in names
+    assert "FindingsInitializer" not in names
 
 
 async def test_discovery_copy_shares_the_active_finding_fields() -> None:
-    path = Path(pyrit.setup.initializers.__file__).parent / "finding_fields.py"
-    spec = importlib.util.spec_from_file_location("discovered_module.finding_fields", path)
+    path = Path(pyrit.setup.initializers.__file__).parent / "findings.py"
+    spec = importlib.util.spec_from_file_location("discovered_module.findings", path)
     copy = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(copy)
 
-    class CopiedFindingFields(copy.FindingFieldsInitializer):
+    class CopiedFindingFields(copy.FindingsInitializer):
         def get_finding_fields(self) -> FindingFields:
             return EXAMPLE
 

@@ -2208,8 +2208,50 @@ export interface FindingCreateRequest extends FindingCreate {
   attack_result_id?: string
 }
 
+/** A finding edit. Each key in `remove_retired_keys` drops that retired value from the stored finding. */
+export interface FindingUpdateRequest extends FindingCreate {
+  remove_retired_keys: string[]
+}
+
 export interface FindingOptionsResponse {
   harm_types: string[]
+}
+
+export type FindingFieldType = 'text' | 'multiline' | 'choice'
+
+export type FindingSeverityColor = 'red' | 'orange' | 'yellow' | 'green' | 'blue' | 'gray' | 'dark' | 'neutral'
+
+export interface FindingFieldOption {
+  key: string
+  label: string
+  /** The options of the next dropdown when this option is chosen. */
+  children: FindingFieldOption[]
+}
+
+/** One field of the finding dialog, as the deployment defines it. */
+export interface FindingField {
+  key: string
+  label: string
+  type: FindingFieldType
+  required: boolean
+  options: FindingFieldOption[]
+  /** The `[key, label]` of each dropdown under a cascade's first one. */
+  levels: Array<[string, string]>
+  default: string | null
+  /** Whether a single-level choice also accepts typed text. */
+  allow_other: boolean
+  /** The severity slot's badge color for each top-level option. */
+  colors: Record<string, FindingSeverityColor>
+  hint: string | null
+  section: string | null
+  /** Shown on the dashboard but left out of exports. */
+  internal: boolean
+}
+
+/** The active finding fields: the severity slot and the fields shown after it. */
+export interface FindingFields {
+  severity: FindingField
+  fields: FindingField[]
 }
 
 export interface Finding extends FindingCreate {

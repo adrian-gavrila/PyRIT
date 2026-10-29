@@ -82,6 +82,7 @@ import type {
   Finding,
   FindingCreate,
   FindingCreateRequest,
+  FindingFields,
   FindingListResponse,
   FindingOptionsResponse,
   FindingEvidenceCreateRequest,
@@ -108,6 +109,9 @@ const operationPath = (operationId: string): string => `/operations/${encodeURIC
 export const operationsApi = {
   getFindingOptions: async (): Promise<FindingOptionsResponse> => {
     return (await apiClient.get('/operations/finding-options')).data
+  },
+  getFindingFields: async (): Promise<FindingFields> => {
+    return (await apiClient.get('/operations/finding-fields')).data
   },
   list: async (): Promise<OperationListResponse> => {
     return (await apiClient.get('/operations')).data

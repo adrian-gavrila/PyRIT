@@ -42,6 +42,7 @@ import {
 import { compatibility, COMPATIBILITY_HEADER } from "./compatibility";
 import { toApiError } from "./errors";
 import { makeAnalyticsFacets, makeAnalyticsReport, makeAnalyticsResults } from "@/test-utils/analyticsFixtures";
+import { DEFAULT_FINDING_FIELDS_FIXTURE } from "@/test-utils/findingFieldsFixtures";
 import type { FindingExportRequest } from "@/types";
 import { DEFAULT_ANALYTICS_VIEW } from "@/utils/attackAnalytics";
 
@@ -52,6 +53,11 @@ describe("api service", () => {
       (apiClient.get as jest.Mock).mockResolvedValueOnce({ data: options });
       expect(await operationsApi.getFindingOptions()).toEqual(options);
       expect(apiClient.get).toHaveBeenCalledWith("/operations/finding-options");
+    });
+    it("gets finding fields", async () => {
+      (apiClient.get as jest.Mock).mockResolvedValueOnce({ data: DEFAULT_FINDING_FIELDS_FIXTURE });
+      expect(await operationsApi.getFindingFields()).toEqual(DEFAULT_FINDING_FIELDS_FIXTURE);
+      expect(apiClient.get).toHaveBeenCalledWith("/operations/finding-fields");
     });
     it("encodes evidence scope, searches literally, and preserves duplicate feedback", async () => {
       const page = { items: [], has_more: false, next_offset: null };

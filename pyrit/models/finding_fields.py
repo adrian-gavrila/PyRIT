@@ -64,6 +64,7 @@ class FindingField(BaseModel):
         colors (dict[str, FindingSeverityColor]): The severity slot's badge color for each top-level option.
         hint (str | None): Help text under the field in the finding dialog.
         section (str | None): A heading the finding dialog shows where the section changes.
+        internal (bool): Whether the field and its levels stay out of exports. The dashboard still shows them.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -81,6 +82,7 @@ class FindingField(BaseModel):
     colors: dict[str, FindingSeverityColor] = {}
     hint: str | None = None
     section: str | None = None
+    internal: bool = False
 
     @field_validator("options", mode="before")
     @classmethod
@@ -202,6 +204,28 @@ class FindingField(BaseModel):
                 raise ValueError(f"'{key}' is not a top-level option of '{self.key}'.")
 
 
+class FindingValueRow(BaseModel):
+    """One filled value of a finding, labelled for display."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    key: str
+    label: str
+    value: str
+    multiline: bool
+    internal: bool
+
+
+class FindingValueDescription(BaseModel):
+    """A finding's values labelled for display, with the stored values that no field uses."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    severity_label: str
+    rows: list[FindingValueRow]
+    retired: list[tuple[str, str]]
+
+
 class FindingFields(BaseModel):
     """A deployment's finding fields: the severity slot and the fields shown after it."""
 
@@ -230,8 +254,8 @@ class FindingFields(BaseModel):
             FindingField: The slot with ``required`` set to True.
 
         Raises:
-            ValueError: If the slot's key is not ``severity``, it is not a choice field, or it sets
-                ``required=False``.
+            ValueError: If the slot's key is not ``severity``, it is not a choice field, it sets
+                ``required=False``, or it is internal.
         """
         if value.key != "severity":
             raise ValueError(f"The severity slot's key must be 'severity', not '{value.key}'.")
@@ -239,6 +263,8 @@ class FindingFields(BaseModel):
             raise ValueError("The severity slot must be a choice field.")
         if "required" in value.model_fields_set and not value.required:
             raise ValueError("The severity slot is always required; leave required out or set it to True.")
+        if value.internal:
+            raise ValueError("The severity slot can't be internal.")
         return value.model_copy(update={"required": True})
 
     @model_validator(mode="after")
@@ -296,6 +322,32 @@ class FindingFields(BaseModel):
         previous = {**previous_values, "severity": previous_severity or ""}
         for field in [self.severity, *self.fields]:
             _check_field_values(field=field, values=values, previous_values=previous)
+
+    def describe_values(self, *, severity: str, field_values: dict[str, str]) -> FindingValueDescription:
+        """
+        Label a finding's filled values for display.
+
+        Rows follow the configured order: the severity slot's levels, then each field and its levels.
+        A choice value shows the label of the matching option under its stored parent; any other value
+        shows as typed.
+
+        Args:
+            severity (str): The severity slot's value.
+            field_values (dict[str, str]): The values of the other fields and of every level, by key.
+
+        Returns:
+            FindingValueDescription: The severity's label, one row per filled value, and the
+                ``(key, value)`` of each stored value that no field or level uses, in stored order.
+        """
+        values = {**field_values, "severity": severity}
+        rows = [row for field in [self.severity, *self.fields] for row in _value_rows(field=field, values=values)]
+        severity_option = _find_option(options=self.severity.options, value=severity)
+        known = self.field_keys
+        return FindingValueDescription(
+            severity_label=severity_option.label if severity_option is not None else severity,
+            rows=[row for row in rows if row.key != "severity"],
+            retired=[(key, value) for key, value in field_values.items() if key not in known],
+        )
 
     def _check_known_keys(self, *, field_values: dict[str, str], previous_values: dict[str, str]) -> None:
         """
@@ -513,7 +565,7 @@ def _check_level(
         if required and options:
             raise FindingValuesError(f"{label} is required.")
         return []
-    match = next((option for option in options if option.key == value), None)
+    match = _find_option(options=options, value=value)
     if match is not None:
         return match.children
     if not unchanged:
@@ -556,6 +608,46 @@ def _non_blank(value: str | None) -> str | None:
         str | None: The value, or None if it is missing or blank.
     """
     return value if value and value.strip() else None
+
+
+def _find_option(*, options: list[FindingFieldOption], value: str | None) -> FindingFieldOption | None:
+    """
+    Find the option whose key is a dropdown's value.
+
+    Args:
+        options (list[FindingFieldOption]): The options the dropdown offers.
+        value (str | None): The dropdown's value, or None if it is missing.
+
+    Returns:
+        FindingFieldOption | None: The matching option, or None if no option has that key.
+    """
+    return next((option for option in options if option.key == value), None)
+
+
+def _value_rows(*, field: FindingField, values: dict[str, str]) -> Iterator[FindingValueRow]:
+    """
+    Label the filled values of one field and of its levels.
+
+    Args:
+        field (FindingField): The field.
+        values (dict[str, str]): Every value of the finding, by key.
+
+    Yields:
+        FindingValueRow: A row for each filled value, in level order.
+    """
+    options = field.options
+    for key, label in [(field.key, field.label), *field.levels]:
+        value = _non_blank(values.get(key))
+        match = _find_option(options=options, value=value)
+        options = match.children if match is not None else []
+        if value is not None:
+            yield FindingValueRow(
+                key=key,
+                label=label,
+                value=match.label if match is not None else value,
+                multiline=field.type == FindingFieldType.MULTILINE,
+                internal=field.internal,
+            )
 
 
 DEFAULT_FINDING_FIELDS = FindingFields(
