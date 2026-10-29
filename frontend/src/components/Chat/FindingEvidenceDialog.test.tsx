@@ -5,6 +5,7 @@ import { FluentProvider, webLightTheme } from '@fluentui/react-components'
 import { MemoryRouter } from 'react-router'
 
 import { attacksApi, operationsApi } from '@/services/api'
+import { DEFAULT_FINDING_FIELDS_FIXTURE } from '@/test-utils/findingFieldsFixtures'
 import type { FindingListItem } from '@/types'
 import FindingEvidenceDialog from './FindingEvidenceDialog'
 
@@ -12,12 +13,12 @@ jest.mock('@/services/api', () => ({
   attacksApi: { getAttack: jest.fn() },
   operationsApi: {
     get: jest.fn(), list: jest.fn(), listFindings: jest.fn(), attachFindingEvidence: jest.fn(), createFinding: jest.fn(),
-    getFindingOptions: jest.fn(),
+    getFindingFields: jest.fn(),
   },
 }))
 
 const FINDING: FindingListItem = {
-  id: 'finding', operation_id: 'saved', title: 'Proof', severity: 'low', description: '',
+  id: 'finding', operation_id: 'saved', title: 'Proof', severity: 'low', field_values: {},
   created_at: '2026-10-08T12:00:00Z', evidence_count: 0,
 }
 const EMPTY = { items: [], has_more: false, next_offset: null }
@@ -53,7 +54,7 @@ beforeEach(() => {
   ;(operationsApi.listFindings as jest.Mock).mockResolvedValue({ ...EMPTY, items: [FINDING] })
   ;(operationsApi.attachFindingEvidence as jest.Mock).mockResolvedValue({ item: { id: 'stable' }, created: true })
   jest.mocked(operationsApi.createFinding).mockResolvedValue(FINDING)
-  jest.mocked(operationsApi.getFindingOptions).mockResolvedValue({ harm_types: ['Malware', 'Other'] })
+  jest.mocked(operationsApi.getFindingFields).mockResolvedValue(DEFAULT_FINDING_FIELDS_FIXTURE)
 })
 
 it('defaults to the attack\'s own Operation and attaches the viewed attack', async () => {
@@ -168,31 +169,52 @@ it('offers creation inside the empty picker and retains the Operation link', asy
   expect(within(screen.getByRole('dialog')).getByRole('button', { name: 'New finding' })).toBeEnabled()
 })
 
+it('keeps New finding unavailable until the finding fields load, and retries them', async () => {
+  const user = userEvent.setup()
+  jest.mocked(operationsApi.getFindingFields).mockRejectedValueOnce(new Error('Fields offline'))
+  renderDialog()
+  await waitFor(() => { expect(screen.getByRole('button', { name: 'Link to finding' })).toBeEnabled() })
+  await user.click(screen.getByRole('button', { name: 'Link to finding' }))
+  expect(await screen.findByText(/Could not load finding fields: Fields offline/)).toBeInTheDocument()
+  expect(await screen.findByRole('radio', { name: /Proof/ })).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'New finding' })).toBeDisabled()
+  await user.click(screen.getByRole('button', { name: 'Retry finding fields' }))
+  await waitFor(() => { expect(screen.getByRole('button', { name: 'New finding' })).toBeEnabled() })
+  expect(screen.getByRole('radio', { name: /Proof/ })).toHaveAccessibleName(/Low/)
+  expect(screen.queryByText(/Could not load finding fields/)).not.toBeInTheDocument()
+})
+
 async function openCreation(user: ReturnType<typeof userEvent.setup>): Promise<void> {
   await waitFor(() => { expect(screen.getByRole('button', { name: 'Link to finding' })).toBeEnabled() })
   await user.click(screen.getByRole('button', { name: 'Link to finding' }))
-  await user.click(await screen.findByRole('button', { name: 'New finding' }))
+  const newFinding = await screen.findByRole('button', { name: 'New finding' })
+  await waitFor(() => { expect(newFinding).toBeEnabled() })
+  await user.click(newFinding)
   await screen.findByRole('heading', { name: 'New finding' })
+}
+
+async function pick(user: ReturnType<typeof userEvent.setup>, label: string, optionName: string): Promise<void> {
+  await user.click(screen.getByRole('combobox', { name: label }))
+  await user.click(within(await screen.findByRole('listbox')).getByRole('option', { name: optionName, exact: true }))
 }
 
 it('creates the finding with the viewed attack as evidence in one request and closes both dialogs', async () => {
   const user = userEvent.setup()
   renderDialog()
   await openCreation(user)
-  expect(screen.getByRole('combobox', { name: 'Severity' })).toHaveValue('moderate')
+  expect(screen.getByRole('combobox', { name: 'Severity' })).toHaveValue('Moderate')
   expect(screen.getByRole('button', { name: 'Save finding' })).toBeDisabled()
   await user.type(screen.getByRole('textbox', { name: 'Title' }), '  ')
   expect(screen.getByRole('button', { name: 'Save finding' })).toBeDisabled()
   await user.type(screen.getByRole('textbox', { name: 'Title' }), 'New assessment')
-  await user.selectOptions(screen.getByRole('combobox', { name: 'Severity' }), 'important')
+  await pick(user, 'Severity', 'Important')
   await user.type(screen.getByRole('textbox', { name: 'Description' }), 'Optional notes')
   expect(screen.queryByRole('textbox', { name: 'Evidence attack ID' })).not.toBeInTheDocument()
   await user.click(screen.getByRole('button', { name: 'Save finding' }))
   expect(await screen.findByText(/Finding created and attack attached/)).toBeInTheDocument()
   expect(operationsApi.createFinding).toHaveBeenCalledWith('saved', {
-    id: expect.any(String), title: '  New assessment', severity: 'important', description: 'Optional notes',
-    severity_other: null, harm_type: null, harm_type_other: null,
-    attack_result_id: 'viewed',
+    id: expect.any(String), title: '  New assessment', severity: 'important',
+    field_values: { description: 'Optional notes' }, attack_result_id: 'viewed',
   })
   expect(operationsApi.attachFindingEvidence).not.toHaveBeenCalled()
   await waitFor(() => { expect(screen.queryByRole('dialog')).not.toBeInTheDocument() })
@@ -202,25 +224,27 @@ it('creates the finding with the viewed attack as evidence in one request and cl
 it('creates and attaches custom classifications from the same shared form and shows them in the picker', async () => {
   const user = userEvent.setup()
   jest.mocked(operationsApi.listFindings).mockResolvedValue({ ...EMPTY, items: [{
-    ...FINDING, severity: 'other', severity_other: 'Team severity', harm_type: 'Other', harm_type_other: 'Team harm',
+    ...FINDING, severity: 'Team severity', field_values: { harm_type: 'Team harm' },
   }] })
   renderDialog()
   await waitFor(() => expect(screen.getByRole('button', { name: 'Link to finding' })).toBeEnabled())
   await user.click(screen.getByRole('button', { name: 'Link to finding' }))
-  expect(await screen.findByText('Team severity')).toBeInTheDocument()
-  expect(screen.getByText('Harm-type: Team harm')).toBeInTheDocument()
+  const entry = await screen.findByRole('radio', { name: /Proof/ })
+  expect(entry).toHaveAccessibleName(/Team severity/)
+  expect(screen.getByText('Team severity')).toBeInTheDocument()
+  expect(screen.queryByText(/Harm-type/)).not.toBeInTheDocument()
+  expect(screen.queryByText(/Team harm/)).not.toBeInTheDocument()
   await user.click(screen.getByRole('button', { name: 'New finding' }))
   await user.type(screen.getByRole('textbox', { name: 'Title' }), 'Custom')
-  await user.selectOptions(screen.getByRole('combobox', { name: 'Severity' }), 'other')
-  await user.type(screen.getByRole('textbox', { name: 'Other severity' }), 'Team severity')
-  await user.click(screen.getByRole('combobox', { name: 'Harm-type' }))
-  await user.click(within(await screen.findByRole('listbox')).getByRole('option', { name: 'Other', exact: true }))
-  await user.type(screen.getByRole('textbox', { name: 'Other harm-type' }), 'Team harm')
+  await pick(user, 'Severity', 'Other')
+  await user.type(screen.getByRole('textbox', { name: 'Other Severity' }), 'Team severity')
+  await pick(user, 'Harm-type', 'Other')
+  await user.type(screen.getByRole('textbox', { name: 'Other Harm-type' }), 'Team harm')
   await user.click(screen.getByRole('button', { name: 'Save finding' }))
   expect(await screen.findByText(/Finding created and attack attached/)).toBeInTheDocument()
   expect(operationsApi.createFinding).toHaveBeenCalledWith('saved', {
-    id: expect.any(String), title: 'Custom', description: '', severity: 'other', severity_other: 'Team severity',
-    harm_type: 'Other', harm_type_other: 'Team harm', attack_result_id: 'viewed',
+    id: expect.any(String), title: 'Custom', severity: 'Team severity', field_values: { harm_type: 'Team harm' },
+    attack_result_id: 'viewed',
   })
 })
 

@@ -12,17 +12,24 @@ interface FindingFieldsState {
   readonly retry: () => void
 }
 
-/** Loads the active finding fields once, for the finding dialog, cards and counts. */
-export function useFindingFields(): FindingFieldsState {
+/**
+ * Loads the active finding fields, for the finding dialog, cards and counts.
+ * @param enabled - Loads only while true, and again each time it turns true, so a closed dialog fetches nothing.
+ */
+export function useFindingFields(enabled = true): FindingFieldsState {
   const [fields, setFields] = useState<FindingFields | null>(null)
   const [error, setError] = useState('')
   const [attempt, setAttempt] = useState(0)
 
   useEffect(() => {
+    if (!enabled) return
     let ignore = false
     operationsApi.getFindingFields()
       .then((loaded: FindingFields) => {
-        if (!ignore) setFields(loaded)
+        if (!ignore) {
+          setFields(loaded)
+          setError('')
+        }
       })
       .catch((cause: unknown) => {
         if (!ignore) setError(toApiError(cause).detail)
@@ -30,7 +37,7 @@ export function useFindingFields(): FindingFieldsState {
     return () => {
       ignore = true
     }
-  }, [attempt])
+  }, [attempt, enabled])
 
   const retry = useCallback(() => {
     setError('')

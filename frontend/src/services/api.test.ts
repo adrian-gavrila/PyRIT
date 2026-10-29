@@ -48,12 +48,6 @@ import { DEFAULT_ANALYTICS_VIEW } from "@/utils/attackAnalytics";
 
 describe("api service", () => {
   describe("operationsApi", () => {
-    it("reads canonical harm categories without copying the taxonomy into the frontend", async () => {
-      const options = { harm_types: ["Malware", "Other"] };
-      (apiClient.get as jest.Mock).mockResolvedValueOnce({ data: options });
-      expect(await operationsApi.getFindingOptions()).toEqual(options);
-      expect(apiClient.get).toHaveBeenCalledWith("/operations/finding-options");
-    });
     it("gets finding fields", async () => {
       (apiClient.get as jest.Mock).mockResolvedValueOnce({ data: DEFAULT_FINDING_FIELDS_FIXTURE });
       expect(await operationsApi.getFindingFields()).toEqual(DEFAULT_FINDING_FIELDS_FIXTURE);
@@ -79,7 +73,8 @@ describe("api service", () => {
       expect(apiClient.delete).toHaveBeenCalledWith("/operations/a%2Fb/findings/c%2Fd/evidence/e%2Ff");
     });
     it("nests finding requests under an encoded operation ID", async () => {
-      const request = { title: "Assessment", description: "", severity: "low" as const };
+      const request = { title: "Assessment", severity: "low", field_values: { description: "Notes" } };
+      const update = { ...request, remove_retired_keys: ["contoso_ticket"] };
       (apiClient.post as jest.Mock).mockResolvedValueOnce({ data: { name: "Case" } });
       await operationsApi.create({ name: " Case / α% " });
       expect(apiClient.post).toHaveBeenCalledWith("/operations", { name: " Case / α% " });
@@ -92,8 +87,8 @@ describe("api service", () => {
         params: { limit: 20, offset: 0 },
       });
       (apiClient.put as jest.Mock).mockResolvedValueOnce({ data: request });
-      expect(await operationsApi.updateFinding("a/b", "c/d", request)).toEqual(request);
-      expect(apiClient.put).toHaveBeenCalledWith("/operations/a%2Fb/findings/c%2Fd", request);
+      expect(await operationsApi.updateFinding("a/b", "c/d", update)).toEqual(request);
+      expect(apiClient.put).toHaveBeenCalledWith("/operations/a%2Fb/findings/c%2Fd", update);
       (apiClient.delete as jest.Mock).mockResolvedValueOnce({ data: undefined });
       expect(await operationsApi.deleteFinding("a/b", "c/d")).toBeUndefined();
       expect(apiClient.delete).toHaveBeenCalledWith("/operations/a%2Fb/findings/c%2Fd");

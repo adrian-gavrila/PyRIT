@@ -2155,7 +2155,6 @@ export interface RuntimeStatus {
   outcome: string
   message: string
 }
-export type FindingSeverity = 'critical' | 'important' | 'moderate' | 'low' | 'informational' | 'other'
 
 export interface OperationCreate {
   name: string
@@ -2185,7 +2184,8 @@ export interface OperationDetail extends Operation {
 }
 
 export interface OperationListItem extends Operation {
-  finding_counts: Partial<Record<FindingSeverity, number>>
+  /** Finding counts by stored severity, including severities that match no current option. */
+  finding_counts: Record<string, number>
 }
 
 export interface OperationListResponse {
@@ -2194,11 +2194,10 @@ export interface OperationListResponse {
 
 export interface FindingCreate {
   title: string
-  description: string
-  severity: FindingSeverity
-  severity_other?: string | null
-  harm_type?: string | null
-  harm_type_other?: string | null
+  /** A severity option key, or Other text. */
+  severity: string
+  /** Values of the other fields and of every level, by key. Severity isn't one of them. */
+  field_values: Record<string, string>
 }
 
 /** Resending the same id and content returns the finding an earlier, unanswered request saved. */
@@ -2211,10 +2210,6 @@ export interface FindingCreateRequest extends FindingCreate {
 /** A finding edit. Each key in `remove_retired_keys` drops that retired value from the stored finding. */
 export interface FindingUpdateRequest extends FindingCreate {
   remove_retired_keys: string[]
-}
-
-export interface FindingOptionsResponse {
-  harm_types: string[]
 }
 
 export type FindingFieldType = 'text' | 'multiline' | 'choice'

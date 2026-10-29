@@ -80,11 +80,10 @@ import type {
   UpdateAttackRequest,
   SaveConversationRequest,
   Finding,
-  FindingCreate,
   FindingCreateRequest,
   FindingFields,
   FindingListResponse,
-  FindingOptionsResponse,
+  FindingUpdateRequest,
   FindingEvidenceCreateRequest,
   FindingEvidenceAttachResponse,
   FindingEvidenceListResponse,
@@ -107,9 +106,6 @@ const API_BASE_URL = import.meta.env.VITE_API_URL || '/api'
 const operationPath = (operationId: string): string => `/operations/${encodeURIComponent(operationId)}`
 
 export const operationsApi = {
-  getFindingOptions: async (): Promise<FindingOptionsResponse> => {
-    return (await apiClient.get('/operations/finding-options')).data
-  },
   getFindingFields: async (): Promise<FindingFields> => {
     return (await apiClient.get('/operations/finding-fields')).data
   },
@@ -136,7 +132,7 @@ export const operationsApi = {
   createFinding: async (operationId: string, request: FindingCreateRequest): Promise<Finding> => {
     return (await apiClient.post(`${operationPath(operationId)}/findings`, request)).data
   },
-  updateFinding: async (operationId: string, findingId: string, request: FindingCreate): Promise<Finding> => {
+  updateFinding: async (operationId: string, findingId: string, request: FindingUpdateRequest): Promise<Finding> => {
     return (await apiClient.put(`${operationPath(operationId)}/findings/${encodeURIComponent(findingId)}`, request)).data
   },
   deleteFinding: async (operationId: string, findingId: string): Promise<void> => {
