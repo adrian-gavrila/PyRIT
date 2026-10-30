@@ -75,6 +75,7 @@ With `allow_custom_initializers: true`, the backend runs every script in that so
 ## Rules
 
 - Use one `FindingsInitializer` per deployment. If the configuration lists two, or the fields are invalid, setup fails when the backend starts. The backend still runs, but it blocks runtime operations, including findings, until a process restart. Configuration repair stays available. A live apply reports invalid configuration instead, and the running fields don't change.
+- Don't make `get_finding_fields` depend on environment variables. A live apply checks the fields before it applies the new environment.
 - Change a field's `label` to rename what people see.
 - A changed `key` makes a new field. Values saved under the old key show under **Retired fields**, where they are read-only. Edits keep them. **Remove** deletes one when you save.
 - Other text that matches an option's key or label is rejected, ignoring case and surrounding spaces. The message names the option to choose instead.

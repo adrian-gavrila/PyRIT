@@ -116,13 +116,16 @@ class FindingField(BaseModel):
 
     def _check_key(self, key: str) -> None:
         """
-        Require a key of lowercase letters, digits and underscores.
+        Require a key of lowercase letters, digits and underscores, other than ``__proto__``.
 
         Raises:
-            ValueError: If the key uses any other character or is empty.
+            ValueError: If the key uses any other character, is empty, or is ``__proto__``.
         """
         if not self._KEY_PATTERN.fullmatch(key):
             raise ValueError(f"Key '{key}' must use only lowercase letters, digits and underscores.")
+        # JavaScript objects treat this name as their prototype, so CoPyRIT couldn't keep a value under it.
+        if key == "__proto__":
+            raise ValueError("Key '__proto__' is reserved.")
 
     def _check_not_blank(self) -> None:
         """

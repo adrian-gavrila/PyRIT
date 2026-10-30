@@ -20,11 +20,12 @@ def test_finding_round_trips_severity_and_field_values() -> None:
     assert finding.created_at.utcoffset().total_seconds() == 0
 
 
-def test_finding_drops_blank_field_values_and_keeps_other_text_exactly() -> None:
+def test_finding_strips_severity_drops_blank_field_values_and_keeps_other_text_exactly() -> None:
     finding = FindingCreate(
-        title="Leak", severity="  Sev 2.5  ", field_values={"steps": "", "owner": "   ", "notes": "  kept  "}
+        title="  Leak  ", severity="  Sev 2.5  ", field_values={"steps": "", "owner": "   ", "notes": "  kept  "}
     )
-    assert finding.severity == "  Sev 2.5  "
+    assert finding.title == "  Leak  "
+    assert finding.severity == "Sev 2.5"
     assert finding.field_values == {"notes": "  kept  "}
 
 

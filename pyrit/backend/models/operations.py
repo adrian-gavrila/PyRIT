@@ -64,7 +64,9 @@ class _FindingRequestFields(FindingCreate):
     """A finding's values as a request carries them, within the request limits."""
 
     title: TextStr
-    severity: TextStr = Field(description="The key of a severity option, or Other text")
+    severity: TextStr = Field(
+        description="The key of a severity option, or Other text; surrounding whitespace is removed"
+    )
     field_values: dict[IdentifierStr, TextStr] = Field(
         default_factory=dict,
         max_length=MAX_ITEMS,

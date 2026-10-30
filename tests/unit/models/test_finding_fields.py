@@ -170,6 +170,8 @@ def test_finding_fields_rejects_invalid_definitions(severity: dict, fields: list
     ("field", "match"),
     [
         (_choice(levels=[("Feature", "Feature")], options=NESTED), "lowercase letters, digits and underscores"),
+        (_choice(key="__proto__"), "'__proto__' is reserved"),
+        (_choice(levels=[("__proto__", "Feature")], options=NESTED), "'__proto__' is reserved"),
         (_choice(options=[("chat", " ")]), "must not be blank"),
         (_choice(levels=[("feature", "Feature")], options={("chat", "Chat"): [(" ", "History")]}), "must not be blank"),
         ({"key": "notes", "label": "Notes", "type": "text", "default": "a"}, "cannot have default"),

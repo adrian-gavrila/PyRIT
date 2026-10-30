@@ -204,7 +204,7 @@ def test_finding_api_round_trips_field_values_and_drops_blanks(compatibility_hea
     response = client.post(path, json=body)
     assert response.status_code == 201
     finding = response.json()
-    assert finding["severity"] == "  Team severity  "
+    assert finding["severity"] == "Team severity"
     assert finding["field_values"] == {"harm_type": "Malware"}
     assert client.get(path).json()["items"] == [{**finding, "evidence_count": 0}]
     updated = client.put(f"{path}/{finding['id']}", json={"title": "Edited", "severity": "low"})

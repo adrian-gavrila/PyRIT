@@ -5,8 +5,9 @@ import { FluentProvider, webLightTheme } from '@fluentui/react-components'
 import { MemoryRouter } from 'react-router'
 
 import { attacksApi, operationsApi } from '@/services/api'
+import { useRuntime } from '@/hooks/useRuntime'
 import { pick } from '@/test-utils/findingDialog'
-import { DEFAULT_FINDING_FIELDS_FIXTURE } from '@/test-utils/findingFieldsFixtures'
+import { CONTOSO_FINDING_FIELDS, DEFAULT_FINDING_FIELDS_FIXTURE } from '@/test-utils/findingFieldsFixtures'
 import type { FindingListItem } from '@/types'
 import FindingEvidenceDialog from './FindingEvidenceDialog'
 
@@ -17,6 +18,7 @@ jest.mock('@/services/api', () => ({
     getFindingFields: jest.fn(),
   },
 }))
+jest.mock('@/hooks/useRuntime', () => ({ ...jest.requireActual('@/hooks/useRuntime'), useRuntime: jest.fn() }))
 
 const FINDING: FindingListItem = {
   id: 'finding', operation_id: 'saved', title: 'Proof', severity: 'low', field_values: {},
@@ -38,15 +40,22 @@ function Harness({ disabled, ...props }: {
   </>
 }
 
-function renderDialog(defaultOperationId: string | null = null): void {
-  render(<FluentProvider theme={webLightTheme}><MemoryRouter>
-    <Harness attackResultId="viewed" disabled={false}
-      defaultOperationId={defaultOperationId} />
-  </MemoryRouter></FluentProvider>)
+/** Renders the dialog and returns a function that renders it again, as a context change would. */
+function renderDialog(defaultOperationId: string | null = null): () => void {
+  // A new element each time, so React renders the dialog again instead of keeping the previous output.
+  const tree = () => (
+    <FluentProvider theme={webLightTheme}><MemoryRouter>
+      <Harness attackResultId="viewed" disabled={false}
+        defaultOperationId={defaultOperationId} />
+    </MemoryRouter></FluentProvider>
+  )
+  const { rerender } = render(tree())
+  return () => { rerender(tree()) }
 }
 
 beforeEach(() => {
   jest.clearAllMocks()
+  jest.mocked(useRuntime).mockReturnValue({ ready: true, state: 'ready', generation: 'one' })
   for (const method of Object.values(operationsApi)) jest.mocked(method).mockReset()
   jest.mocked(attacksApi.getAttack).mockReset()
   ;(attacksApi.getAttack as jest.Mock).mockResolvedValue({ operation_id: 'saved', operation_name: 'Exact' })
@@ -74,6 +83,22 @@ it('defaults to the attack\'s own Operation and attaches the viewed attack', asy
   expect(operationsApi.attachFindingEvidence).toHaveBeenCalledWith('saved', 'finding', {
     attack_result_id: 'viewed',
   })
+})
+
+it('loads its findings again when a live apply changes the severity order while it is open', async () => {
+  const user = userEvent.setup()
+  const renderAgain = renderDialog()
+  const action = await screen.findByRole('button', { name: 'Link to finding' })
+  await waitFor(() => { expect(action).toBeEnabled() })
+  await user.click(action)
+  await screen.findByRole('radio', { name: /Proof/ })
+  const loads = jest.mocked(operationsApi.listFindings).mock.calls.length
+
+  jest.mocked(operationsApi.getFindingFields).mockResolvedValue(CONTOSO_FINDING_FIELDS)
+  jest.mocked(useRuntime).mockReturnValue({ ready: true, state: 'ready', generation: 'two' })
+  await act(async () => { renderAgain() })
+  await waitFor(() => expect(operationsApi.listFindings).toHaveBeenCalledTimes(loads + 1))
+  expect(screen.getByRole('dialog')).toBeInTheDocument()
 })
 
 it.each([null, 'Exact'])('links an attack without an Operation ID (legacy name %s) using the selected Operation', async (

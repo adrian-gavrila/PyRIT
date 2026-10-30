@@ -13,12 +13,12 @@ class FindingCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     title: str
-    severity: str = Field(description="The key of a severity option, or Other text")
+    severity: str = Field(description="The key of a severity option, or Other text; surrounding whitespace is removed")
     field_values: dict[str, str] = Field(
         {}, description="Values by field or level key, each an option's key or text; blank values are dropped"
     )
 
-    @field_validator("title", "severity")
+    @field_validator("title")
     @classmethod
     def _reject_blank(cls, value: str) -> str:
         """
@@ -33,6 +33,23 @@ class FindingCreate(BaseModel):
         if not value.strip():
             raise ValueError("Must not be blank.")
         return value
+
+    @field_validator("severity")
+    @classmethod
+    def _strip_severity(cls, value: str) -> str:
+        """
+        Remove surrounding whitespace and reject blank text.
+
+        Returns:
+            str: The severity without surrounding whitespace.
+
+        Raises:
+            ValueError: If the severity is blank.
+        """
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("Must not be blank.")
+        return stripped
 
     @field_validator("field_values")
     @classmethod

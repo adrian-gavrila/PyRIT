@@ -39,7 +39,7 @@ export default function FindingEvidenceDialog({
 }: FindingEvidenceDialogProps) {
   const styles = useFindingEvidenceDialogStyles()
   // `open` stays true while the embedded finding dialog replaces the picker, so this covers both.
-  const { fields, error: fieldsError, retry: retryFields } = useFindingFields(open)
+  const { fields, error: fieldsError, retry: retryFields, orderRevision } = useFindingFields(open)
   const viewKey = attackResultId
   const [defaultLookup, setDefaultLookup] = useState<{ key: string; operation: Operation | null } | null>(null)
   const [chosen, setChosen] = useState<{ key: string; operation: Operation } | null>(null)
@@ -71,7 +71,7 @@ export default function FindingEvidenceDialog({
   // Evidence can come from any attack; the user picks whose findings to link, defaulting to the attack's own Operation.
   const operation = chosen?.key === viewKey ? chosen.operation
     : defaultLookup?.key === viewKey ? defaultLookup.operation : null
-  const requestKey = JSON.stringify([attackResultId, operation?.id, title, offset, listRevision])
+  const requestKey = JSON.stringify([attackResultId, operation?.id, title, offset, listRevision, orderRevision])
   // A selection only applies to the attack and operation it was made for.
   const selectionKey = JSON.stringify([attackResultId, operation?.id])
   const selection = picked?.key === selectionKey ? picked.finding : null

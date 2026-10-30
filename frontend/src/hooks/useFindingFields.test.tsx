@@ -51,6 +51,27 @@ describe('useFindingFields', () => {
     expect(result.current.error).toBe('')
   })
 
+  it('changes orderRevision only when a reload brings a different severity order', async () => {
+    mockGetFindingFields
+      .mockResolvedValueOnce(DEFAULT_FINDING_FIELDS_FIXTURE)
+      .mockResolvedValueOnce({ ...DEFAULT_FINDING_FIELDS_FIXTURE })
+      .mockResolvedValueOnce(CONTOSO_FINDING_FIELDS)
+
+    const { result, rerender } = renderHook(() => useFindingFields())
+    await waitFor(() => expect(result.current.fields).toBe(DEFAULT_FINDING_FIELDS_FIXTURE))
+    const loaded = result.current.orderRevision
+
+    mockRuntime.mockReturnValue({ ready: true, state: 'ready', generation: 'two' })
+    rerender()
+    await waitFor(() => expect(result.current.fields).not.toBe(DEFAULT_FINDING_FIELDS_FIXTURE))
+    expect(result.current.orderRevision).toBe(loaded)
+
+    mockRuntime.mockReturnValue({ ready: true, state: 'ready', generation: 'three' })
+    rerender()
+    await waitFor(() => expect(result.current.fields).toBe(CONTOSO_FINDING_FIELDS))
+    expect(result.current.orderRevision).not.toBe(loaded)
+  })
+
   it('reports a load failure and retries', async () => {
     mockGetFindingFields
       .mockRejectedValueOnce(new Error('The Contoso backend is unavailable.'))

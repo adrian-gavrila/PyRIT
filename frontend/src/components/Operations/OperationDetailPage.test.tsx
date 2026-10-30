@@ -4,6 +4,7 @@ import { FluentProvider, webLightTheme } from '@fluentui/react-components'
 import { MemoryRouter, Route, Routes } from 'react-router'
 
 import { attacksApi, operationsApi, scenariosApi } from '@/services/api'
+import { useRuntime } from '@/hooks/useRuntime'
 import { deferred } from '@/test-utils/deferred'
 import { findRemovalConfirmation, pick } from '@/test-utils/findingDialog'
 import { CONTOSO_FINDING_FIELDS, DEFAULT_FINDING_FIELDS_FIXTURE } from '@/test-utils/findingFieldsFixtures'
@@ -20,6 +21,7 @@ jest.mock('@/services/api', () => ({
   attacksApi: { listAttacks: jest.fn() },
   scenariosApi: { listRuns: jest.fn() },
 }))
+jest.mock('@/hooks/useRuntime', () => ({ ...jest.requireActual('@/hooks/useRuntime'), useRuntime: jest.fn() }))
 
 const SAVED: Operation = { id: 'op-1', name: 'Red team / α%', created_at: '2026-10-06T20:00:00Z' }
 const OPERATION: OperationDetail = { ...SAVED, usage: { findings: 0, attacks: 0, scenario_runs: 0 } }
@@ -31,8 +33,10 @@ const EMPTY = { items: [], has_more: false, next_offset: null }
 const NOT_FOUND = { isAxiosError: true, response: { status: 404, data: { detail: 'missing' } } }
 const conflict = (detail: object) => ({ isAxiosError: true, response: { status: 409, data: { detail } } })
 
-function renderPage(route = '/operations/op-1', onOperationChanged?: () => void): void {
-  render(
+/** Renders the page and returns a function that renders it again, as a context change would. */
+function renderPage(route = '/operations/op-1', onOperationChanged?: () => void): () => void {
+  // A new element each time, so React renders the page again instead of keeping the previous output.
+  const page = () => (
     <FluentProvider theme={webLightTheme}>
       <MemoryRouter initialEntries={[route]}>
         <Routes>
@@ -41,12 +45,15 @@ function renderPage(route = '/operations/op-1', onOperationChanged?: () => void)
             element={<OperationDetailPage onOperationChanged={onOperationChanged} />} />
         </Routes>
       </MemoryRouter>
-    </FluentProvider>,
+    </FluentProvider>
   )
+  const { rerender } = render(page())
+  return () => { rerender(page()) }
 }
 
 beforeEach(() => {
   jest.clearAllMocks()
+  jest.mocked(useRuntime).mockReturnValue({ ready: true, state: 'ready', generation: 'one' })
   jest.mocked(operationsApi.getFindingFields).mockResolvedValue(DEFAULT_FINDING_FIELDS_FIXTURE)
   jest.mocked(operationsApi.get).mockResolvedValue(OPERATION)
   jest.mocked(operationsApi.listFindings).mockResolvedValue(EMPTY)
@@ -618,4 +625,26 @@ it('pages through findings', async () => {
   await screen.findByText(/no findings/i)
   expect(jest.mocked(operationsApi.listFindings).mock.calls.at(-1)).toEqual(['op-1', { limit: 20, offset: 20 }])
   expect(screen.getByText('Page 2')).toBeInTheDocument()
+})
+
+it('loads the shown page again only when a live apply changes the severity order', async () => {
+  jest.mocked(operationsApi.listFindings).mockResolvedValue({ ...EMPTY, items: [FINDING] })
+  const pageCalls = (): unknown[] =>
+    jest.mocked(operationsApi.listFindings).mock.calls.filter(([, params]) => params.limit === 20)
+  const renderAgain = renderPage('/operations/op-1?offset=20')
+  await screen.findByRole('heading', { level: 2, name: FINDING.title })
+  expect(pageCalls()).toHaveLength(1)
+
+  jest.mocked(operationsApi.getFindingFields).mockResolvedValue({ ...DEFAULT_FINDING_FIELDS_FIXTURE })
+  jest.mocked(useRuntime).mockReturnValue({ ready: true, state: 'ready', generation: 'two' })
+  await act(async () => { renderAgain() })
+  await waitFor(() => expect(operationsApi.getFindingFields).toHaveBeenCalledTimes(2))
+  await act(async () => {})
+  expect(pageCalls()).toHaveLength(1)
+
+  jest.mocked(operationsApi.getFindingFields).mockResolvedValue(CONTOSO_FINDING_FIELDS)
+  jest.mocked(useRuntime).mockReturnValue({ ready: true, state: 'ready', generation: 'three' })
+  await act(async () => { renderAgain() })
+  await waitFor(() => expect(pageCalls()).toHaveLength(2))
+  expect(pageCalls().at(-1)).toEqual(['op-1', { limit: 20, offset: 20 }])
 })

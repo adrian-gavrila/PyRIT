@@ -17,7 +17,9 @@ class FindingsInitializer(PyRITInitializer):
     @abstractmethod
     def get_finding_fields(self) -> FindingFields:
         """
-        Return the deployment's finding fields.
+        Return the deployment's finding fields, the same whatever the environment variables.
+
+        A live apply checks these fields before it applies the new environment.
 
         Returns:
             FindingFields: The fields that setup makes active.
